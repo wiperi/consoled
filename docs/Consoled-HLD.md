@@ -1,4 +1,4 @@
-# SONiC consoled (Serial Link State Detection & Interactive Console Handover)
+# SONiC consoled (Serial Link State Detection)
 
 # High Level Design Document
 
@@ -19,12 +19,10 @@
 
     * [1.1.1 Functional Requirements](#111-functional-requirements)
     * [1.1.2 Non-Functional Requirements](#112-non-functional-requirements)
-    * [1.1.3 Configuration and Management Requirements](#113-configuration-and-management-requirements)
   * [1.2 Design Overview](#12-design-overview)
 
     * [1.2.1 Basic Approach](#121-basic-approach)
-    * [1.2.2 Components](#122-components)
-    * [1.2.3 Deployment Model](#123-deployment-model)
+    * [1.2.2 Container](#122-container)
 * [2 Functionality](#2-functionality)
 
   * [2.1 Target Deployment Use Cases](#21-target-deployment-use-cases)
@@ -34,31 +32,23 @@
 
   * [3.1 Architecture Overview](#31-architecture-overview)
 
-    * [3.1.1 Serial Link Model](#311-serial-link-model)
-    * [3.1.2 Sender-Side Coordination with consutil](#312-sender-side-coordination-with-consutil)
-    * [3.1.3 Receiver-Side Exclusive Serial Ownership and PTY Handover](#313-receiver-side-exclusive-serial-ownership-and-pty-handover)
-    * [3.1.4 Pause/Resume Protocol and Deterministic Handover](#314-pauseresume-protocol-and-deterministic-handover)
-    * [3.1.5 State Machine](#315-state-machine)
+    * [3.1.1 Startup](#311-startup)
+    * [3.1.2 Sender Behavior](#312-sender-behavior)
+    * [3.1.3 Sender-Side Coordination with consutil](#313-sender-side-coordination-with-consutil)
+    * [3.1.4 Receiver Behavior](#314-receiver-behavior)
+    * [3.1.5 Receiver-Side Exclusive Serial Ownership and PTY Handover](#315-receiver-side-exclusive-serial-ownership-and-pty-handover)
+    * [3.1.6 State Machine](#316-state-machine)
   * [3.2 DB Changes](#32-db-changes)
 
     * [3.2.1 CONFIG_DB](#321-config-db)
     * [3.2.2 STATE_DB](#322-state-db)
   * [3.3 CLI](#33-cli)
-
-    * [3.3.1 consoled-control (optional)](#331-consoled-control-optional)
-    * [3.3.2 consutil integration](#332-consutil-integration)
-  * [3.4 Systemd and Service Layout](#34-systemd-and-service-layout)
-  * [3.5 Security and Access Control](#35-security-and-access-control)
 * [4 Flow Diagrams](#4-flow-diagrams)
 
   * [4.1 Normal Heartbeat](#41-normal-heartbeat)
-  * [4.2 User Attach and Handover (Receiver side)](#42-user-attach-and-handover-receiver-side)
+  * [4.2 User Attach and Handover](#42-user-attach-and-handover)
   * [4.3 Session End and Resume Probing](#43-session-end-and-resume-probing)
   * [4.4 Crash/Restart Recovery](#44-crashrestart-recovery)
-* [5 Error Handling](#5-error-handling)
-* [6 Serviceability and Debug](#6-serviceability-and-debug)
-* [7 Warm Boot Support](#7-warm-boot-support)
-* [8 Scalability](#8-scalability)
 * [9 Reference](#9-reference)
 
 ---
@@ -70,11 +60,6 @@
 ---
 
 # Revision
-
-| Rev |    Date    |    Authors    | Change Description                                |
-| :-: | :--------: | :-----------: | ------------------------------------------------- |
-| 0.1 | 2025-12-28 | consoled team | Initial draft                                     |
-| 1.0 | 2025-12-28 | consoled team | Filled design details, DB/CLI, handover semantics |
 
 ---
 
@@ -110,8 +95,6 @@ This HLD covers the consoled design for a testbed topology where:
 | Admin | Desired status configured by user                 |
 | PTY   | Pseudo-terminal (master/slave pair)               |
 | UDS   | Unix Domain Socket                                |
-| HA    | High availability via service supervision/restart |
-| HUP   | Hangup event when a TTY/PTY closes                |
 
 ---
 
@@ -178,7 +161,7 @@ consoled provides **link-state observability** for serial links (which lack a ph
 
 1. **OOB readiness monitoring**
 
-   * Detect whether each serial OOB path is usable before emergency operations.
+   * Detect whether each serial link is usable before emergency operations.
 
 2. **Emergency console access**
 
@@ -210,33 +193,38 @@ Probing mechanism depends on system status and correct configuration.
 
 ![consoled Architecture](ConsoledArchitecture.png)
 
-启动
+### 3.1.1 Startup
 
-consoled作为system service被systemctl管理，开机自启动，在config-setup.service服务加载config.json到CONFIG_DB后启动。
+consoled runs as a systemd service managed by `systemctl`. It starts on boot after `config-setup.service` loads `config.json` into CONFIG_DB.
 
-consoled根据CONFIG_DB中CONSOLE_SWITCH:console_mgmt enabled字段决定是作为Sender还是Receiver运行。
+consoled determines whether to run as **Sender** or **Receiver** based on the `enabled` field in `CONSOLE_SWITCH:console_mgmt` table in CONFIG_DB.
 
-Sender：
+### 3.1.2 Sender Behavior
 
-对于每个Serial Port，检查STATE_DB中CONSOLE_PORT|X state是否是idle。
+For each Serial Port, check `CONSOLE_PORT|<link_id> state` in STATE_DB:
 
-如果busy，则监听STATE_DB中CONSOLE_PORT|X state字段的keyspace notifications，等待state变为idle
+* If `busy`: subscribe to STATE_DB keyspace notifications for `CONSOLE_PORT|<link_id> state`, wait until state becomes `idle`
+* If `idle`: start a probe cycle:
+  1. Send `HEARTBEAT` frame
+  2. Wait for `HEARTBEAT_ACK` frame
+  3. Update `CONSOLE_PORT|<link_id> oper_status` in STATE_DB to `up` or `down` based on ACK reception
+  4. Wait for next probe cycle
 
-如果idle，则开始一次probe周期：
-1. 发送HEARTBEAT帧
-2. 等待HEARTBEAT_ACK帧
-3. 根据收到的ACK与否更新STATE_DB中CONSOLE_PORT|X oper_status字段为up或down
-4. 等待下一个probe周期
+**Concurrent listeners:**
 
-同时监听某个channel
-    如果收到connection event，则主动向receiver发送pause_req帧，并等待pause_ack帧。如果收到ack或者超时，主动向channel中发送pause success，该信号将被consutil读取以调用piccocom打开interactive session。
+1. **Redis channel listener** (`CONSOLED_CTRL:<link_id>`):
+   * On receiving `PAUSE_REQ`, send `PAUSE_REQ` frame to receiver and wait for `PAUSE_ACK` frame
+   * Upon receiving ACK or timeout, publish `PAUSE_ACK` to the channel
+   * This signal is consumed by `consutil` to invoke picocom and open an interactive session
 
-同时监听STATE_DB中CONSOLE_PORT|X state字段的keyspace notifications
-    如果state变为idle，发送resume_req帧，等待resume_ack帧，收到ack后继续probe周期
+2. **STATE_DB keyspace notification listener** (`CONSOLE_PORT|<link_id> state`):
+   * When state changes to `idle`, send `RESUME_REQ` frame to receiver
+   * Wait for `RESUME_ACK` frame
+   * Upon receiving ACK, resume probe cycle
 
 ---
 
-### 3.1.2 Sender-Side Coordination with consutil
+### 3.1.3 Sender-Side Coordination with consutil
 
 **Problem:** Sender consoled and `consutil` may contend on the same serial device. `consutil` must not start an interactive program until consoled has paused probing.
 
@@ -251,25 +239,76 @@ Sender：
 2. **consoled** receives message:
     * Stops sending heartbeat frames
     * Publishes `PAUSE_ACK` to `CONSOLED_CTRL:<link_id>` channel
-3. **consutil** waits for `PAUSE_ACK` on the same channel (timeout: 2s)
+3. **consutil** waits for `PAUSE_ACK` on the same channel (timeout: 1s, on_timeout: assume consold is not functional, proceed anyway)
 4. **consutil** opens physical serial device and starts picocom
 5. On session end, **consutil** updates `CONSOLE_PORT|<link_id> state` to `"idle"` in STATE_DB
 6. **consoled** monitors STATE_DB keyspace notifications for `CONSOLE_PORT|<link_id> state` changes
 7. Upon detecting `state = "idle"`, **consoled** resumes probing mode
 
+**Alternative IPC Schemes:**
+
+> **Note:** The current design assumes Redis is available and performs well, with message delivery latency under 1 second.
+
+Other candidates considered:
+* **Unix Domain Sockets** - Direct socket communication without Redis dependency
+* **Redis Streams** - Persistent message queue with better durability guarantees
+
+**Alternative Sender Architecture (Multiplexing Approach):**
+
+> Instead of pausing/resuming, consoled could multiplex heartbeat and interactive traffic on the same serial link using line-based framing.
+
+Design:
+1. consoled exclusively owns the physical TTY on both sender and receiver sides
+2. Both sides create a PTY pair as a "virtual serial port"
+3. `consutil` (sender) and `getty` service (receiver) connect only to the PTY slave
+4. consoled performs line-based multiplexing:
+   * Inspects each line's prefix to determine if it's a heartbeat frame
+   * Forwards heartbeat frames internally, user data to/from PTY
+5. No pause/resume protocol needed - heartbeat and interactive traffic coexist
+
+**Trade-offs:**
+| Aspect | Current (Pause/Resume) | Multiplexing |
+|--------|------------------------|--------------|
+| Complexity | Simpler framing | More complex parsing |
+| Latency | Pause delay on attach | No attach delay |
+| Reliability | Clean separation | Risk of frame corruption |
+
+The feasibility still requires further proof-of-concept verification.
+
 ---
 
-Receiver:
+### 3.1.4 Receiver Behavior
 
-接收端独占串口设备（如/dev/ttyS0），在探测模式下监听心跳帧并回复ACK。当检测到交互式连接请求（本地操作员或远程机制），接收端consoled暂停探测，将串口设备桥接到一个PTY上运行agetty，从而允许登录和控制台操作。断开连接后，consoled恢复串口设备设置并继续心跳。
+The receiver exclusively owns the physical serial device (e.g., `/dev/ttyS0`). In probe mode, it listens for heartbeat frames and replies with ACK.
+
+When an interactive connection request (PAUSE_REQ) is detected, the receiver consoled:
+
+1. **Pauses probing** and stops replying to heartbeat frames
+2. **Bridges the serial device** to a PTY running agetty, enabling login and console operations
+3. **After disconnect (RESUME_REQ)**, consoled restores serial device settings and resumes heartbeat
+
+**Alternative Receiver Approaches:**
+
+> The goal is simply to determine link availability. The only information operators need is: "Can I manage the DTE via console?" The simplest approach would be for the sender to periodically send `\r` - if the link and system services are working, the operator would see the some prompt (e.g., `bjw3-can-7050c-5 login:`) echoed back.
+
+Regardless of approach, receiving heartbeat at software layer implies:
+* Hardware link is connected AND system service is running correctly
+
+| Receiver Type | Heartbeat Received Means | Heartbeat Not Received Means |
+|---------------|--------------------------|------------------------------|
+| **getty as receiver** | Hardware link OK AND getty service OK | Hardware link down OR getty misconfigured |
+| **consoled as receiver** | Hardware link OK AND consoled service OK | Hardware link down OR consoled misconfigured |
+
+In either case, no heartbeat response means the console path is unusable for device management.
 
 
+---
 
-### 3.1.3 Receiver-Side Exclusive Serial Ownership and PTY Handover
+### 3.1.5 Receiver-Side Exclusive Serial Ownership and PTY Handover
 
 #### Probe Mode
 
-* consoled **exclusively opens** physical serial device (e.g., `/dev/ttyS0`)
+* consoled exclusively opens physical serial device
 * consoled listens for heartbeat frames and replies with ACK
 
 #### Interactive mode
@@ -288,7 +327,7 @@ On detecting an interactive attach request (from local operator or remote mechan
     * serial-getty automatically invokes agetty with appropriate parameters for serial login
 4. **Bridges physical serial ↔ PTY master using socat**
 
-    * example: `socat /dev/ttyUSB0,raw,echo=0 <pty_master>,raw,echo=0`
+    * example: `socat /dev/ttyS0,raw,echo=0 <pty_master>,raw,echo=0`
     * full-duplex forwarding between physical TTY and PTY master
     * ensures the user interacts with a normal login experience via agetty on the PTY slave
 5. **Session end**
@@ -297,11 +336,11 @@ On detecting an interactive attach request (from local operator or remote mechan
 
 ---
 
-### 3.1.5 State Machine
+### 3.1.6 State Machine
 
-![Sender FSM](ConsoledSenderFSM.png.png)
+![Sender FSM](ConsoledSenderFSM.png)
 
-![Receiver FSM](ConsoleReceiverFSM.png.png.png)
+![Receiver FSM](ConsoleReceiverFSM.png)
 
 ---
 
@@ -332,124 +371,51 @@ To be determined.
 
 ---
 
-## 3.4 Systemd and Service Layout
-
-* `consoled.service` on both C0 and DTE
-* `Restart=always` with bounded restart bursts
-* ensures recovery after crashes/reboots
-
-Receiver-side agetty lifecycle:
-
-* spawned and owned by consoled (recommended)
-* consoled tracks PID and ensures cleanup on detach or daemon restart
-
-On daemon restart:
-
-* consoled reads STATE_DB/Config and reconciles:
-
-  * if `ATTACHED` but no PTY/agetty exists → force cleanup and return to PROBING
-  * if agetty exists but consoled restarted → reattach monitoring or terminate safely
-
----
-
-## 3.5 Security and Access Control
-
-* Physical serial device permissions should prevent arbitrary multi-process open.
-* Receiver-side design already enforces single owner by keeping physical device open in consoled only.
-* PTY slave permissions:
-
-  * allow interactive login only for intended users/groups
-  * agetty/login obey PAM and system policies
-
-UDS RPC access:
-
-* restrict socket filesystem permissions to trusted group (e.g., `sudo` or `admin`)
-
----
-
 # 4 Flow Diagrams
-
-(Shown as text sequences; can be converted to diagrams if desired.)
 
 ## 4.1 Normal Heartbeat
 
-* Sender: send `HEARTBEAT(epoch, seq)`
-* Receiver: reply `HEARTBEAT_ACK(epoch, seq)`
-* Sender: update `oper_status=up`
-* Timeout: `oper_status=down` with retry/backoff
+* Sender: send `HEARTBEAT`
+* Receiver: reply `HEARTBEAT_ACK`
+* Sender: update STATE_DB `CONSOLE_PORT|<link_id> oper_status=up`
+* Timeout: `CONSOLE_PORT|<link_id> oper_status=down`
 
-## 4.2 User Attach and Handover (Receiver side)
+## 4.2 User Attach and Handover
 
-1. attach requested (local/remote control path)
-2. receiver consoled enters `QUIESCING`
-3. stop probe replies/traffic
-4. drain residual bytes + quiet window
-5. set `PAUSED_READY`
-6. create PTY
-7. start agetty on PTY slave
-8. enable bridging physical serial ↔ PTY
-9. set `ATTACHED`
+1. User execute `connect line <line_id>` on C0 (Sender)
+2. consutil publishes `PAUSE_REQ` to `CONSOLED_CTRL:<link_id>` channel
+3. sender consoled receives `PAUSE_REQ` message
+4. sender consoled sends `PAUSE_REQ` frame to receiver
+5. receiver consoled receives `PAUSE_REQ` frame
+6. receiver consoled initiates handover procedure: bridge console device to PTY
+7. receiver consoled sends `PAUSE_ACK` frame to sender
+8. sender consoled receives `PAUSE_ACK` frame
+9. sender consoled publishes `PAUSE_ACK` to `CONSOLED_CTRL:<link_id>` channel
+10. consutil receives `PAUSE_ACK`, opens serial device, starts picocom
+11. User interacts with console via picocom
 
 ## 4.3 Session End and Resume Probing
 
-1. PTY slave closes / agetty exits
-2. consoled stops bridging
-3. cleanup PTY + terminate agetty
-4. restore serial settings
-5. set `PROBING` and resume heartbeat replies
+1. User exits picocom on C0 (Sender)
+2. consutil updates `CONSOLE_PORT|<link_id> state=idle` in STATE_DB
+3. sender consoled detects state change via keyspace notification
+4. sender consoled sends `RESUME_REQ` frame to receiver
+5. receiver consoled receives `RESUME_REQ` frame
+6. receiver consoled initiates resume procedure: unbridge console device and pty_master, restart probing (watching for HEARTBEAT)
+7. receiver consoled sends `RESUME_ACK` frame to sender
+8. sender consoled receives `RESUME_ACK` frame
+9. sender consoled goes into `IDLE` mode and start next round of heartbeat probing
 
 ## 4.4 Crash/Restart Recovery
 
 * systemd restarts consoled
-* consoled reconciles state:
+* consoled go through initialization again:
 
-  * cleanup stale PTY/agetty
-  * re-open serial and resume probing
-  * sender re-handshakes epochs and resumes classification
-
----
-
-# 5 Error Handling
-
-* Serial open failures: mark `oper_status=unknown`, `probe_mode=paused`, publish `error`
-* PTY creation failure: fail attach request, keep probing paused only if safe; otherwise resume probing
-* agetty spawn failure: fail attach, cleanup PTY, resume probing
-* Unexpected bytes / protocol desync: reset per-link epoch and re-sync
-* Detach timeout: if agetty is unresponsive, send SIGTERM then SIGKILL with bounded timing; cleanup PTY
-
----
-
-# 6 Serviceability and Debug
-
-* Structured logs per link and per transition:
-
-  * state transitions with epoch
-  * attach/detach events with PID/user (where available)
-  * heartbeat statistics (sent/acked/timeouts)
-* Debug commands:
-
-  * show link state
-  * show current owner/mode
-  * dump last error and last transition timestamp
-* Techsupport integration: capture consoled logs and relevant STATE_DB keys
-
----
-
-# 7 Warm Boot Support
-
-* consoled persists logical state in STATE_DB and can reconstruct after warm reboot.
-* After reboot, consoled always reconciles runtime artifacts (PTY/agetty) to avoid stale “busy” state.
-
----
-
-# 8 Scalability
-
-* Sender: scales linearly with number of links; each link can be handled by an event-driven loop.
-* Receiver: per physical port one state machine; PTY/agetty only exist during active interactive sessions.
-* Resource limits:
-
-  * maximum concurrent interactive sessions equals number of ports (1 per port)
-  * heartbeat polling interval should be tuned to avoid CPU spikes under N ports
+  * read CONFIG_DB/STATE_DB
+  * determine Sender/Receiver role
+  * Create PTY pairs if needed
+  * Ensure getty service is running on PTY slave
+  * re-open serial and resume probing (start from `IDLE` mode)
 
 ---
 
