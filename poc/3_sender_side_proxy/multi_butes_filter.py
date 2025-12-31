@@ -97,24 +97,34 @@ class StringFilter:
     2. 每个字节到来时检查是否能继续匹配
     3. 如果匹配失败，立即输出已缓存的字节并重置状态
     4. 如果完全匹配，丢弃整个目标字符串
+    5. 如果超时未收到新数据，立即透传缓存的部分匹配
     
     性能特点：
     - O(1) 每字节处理时间
     - 最小化缓冲延迟：失败时立即透传
     - 内存占用固定：只缓存最多 len(pattern) - 1 个字节
+    - 超时机制：避免部分匹配数据长时间滞留
     """
     
-    def __init__(self, pattern: bytes):
+    def __init__(self, pattern: bytes, timeout: float = 0.1):
+        """
+        Args:
+            pattern: 要过滤的字节串
+            timeout: 超时时间（秒），buffer 非空时超过此时间未收到新数据则透传
+        """
         if not pattern:
             raise ValueError("Pattern cannot be empty")
         self.pattern = pattern
         self.pattern_len = len(pattern)
+        self.timeout = timeout
         # 预计算失败函数（KMP风格），用于快速回退
         self.failure = self._compute_failure(pattern)
         # 当前匹配位置
         self.match_pos = 0
         # 缓存的部分匹配字节
         self.buffer = bytearray()
+        # 上次收到数据的时间戳
+        self.last_data_time: float = 0.0
     
     @staticmethod
     def _compute_failure(pattern: bytes) -> list:
@@ -143,6 +153,9 @@ class StringFilter:
         - 部分匹配的字节暂时缓存，等待后续数据
         """
         output = bytearray()
+        
+        # 更新时间戳
+        self.last_data_time = time.monotonic()
         
         for byte in data:
             # 尝试匹配当前字节
@@ -183,17 +196,53 @@ class StringFilter:
         """重置过滤器状态。"""
         self.buffer.clear()
         self.match_pos = 0
+    
+    def check_timeout(self) -> bytes:
+        """
+        检查是否超时，如果超时则透传缓存的数据。
+        
+        Returns:
+            超时时返回缓存的数据，否则返回空 bytes
+        """
+        if self.buffer and self.last_data_time > 0:
+            elapsed = time.monotonic() - self.last_data_time
+            if elapsed >= self.timeout:
+                result = bytes(self.buffer)
+                self.buffer.clear()
+                self.match_pos = 0
+                self.last_data_time = 0.0
+                return result
+        return b""
+    
+    def has_pending_data(self) -> bool:
+        """检查是否有待处理的缓存数据。"""
+        return len(self.buffer) > 0
+    
+    def get_timeout_remaining(self) -> float:
+        """
+        获取距离超时还剩多少时间。
+        
+        Returns:
+            剩余时间（秒），如果没有缓存数据则返回 -1
+        """
+        if not self.buffer or self.last_data_time <= 0:
+            return -1.0
+        elapsed = time.monotonic() - self.last_data_time
+        remaining = self.timeout - elapsed
+        return max(0.0, remaining)
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("serial_dev", help="e.g. /dev/C0-1 or /dev/ttyS0")
     parser.add_argument("baud", nargs="?", type=int, default=115200, help="e.g. 9600 (default 115200)")
     parser.add_argument("-f", "--filter", default="hello", help="String to filter out (default: 'hello')")
+    parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds for partial match (default: 1)")
     args = parser.parse_args()
 
     serial_dev = args.serial_dev
     baud = args.baud
     filter_pattern = args.filter.encode('utf-8')
+    filter_timeout = args.timeout
 
     # 1) 创建 PTY
     pty_master, pty_slave = os.openpty()
@@ -213,6 +262,7 @@ def main() -> int:
     print(f"[proxy] PTY for user: {pty_slave_name}")
     print(f"[proxy] Connect with: picocom -b {baud} {pty_slave_name}")
     print(f"[proxy] Filtering string: {repr(filter_pattern)}")
+    print(f"[proxy] Match timeout: {filter_timeout}s")
     sys.stdout.flush()
 
     stop = False
@@ -228,11 +278,28 @@ def main() -> int:
     sel.register(pty_master, selectors.EVENT_READ, data="pty")
 
     # 创建字符串过滤器
-    string_filter = StringFilter(filter_pattern)
+    string_filter = StringFilter(filter_pattern, timeout=filter_timeout)
 
     try:
         while not stop:
-            events = sel.select(timeout=0.5)
+            # 动态调整 select 超时：如果有缓存数据，使用剩余超时时间
+            select_timeout = string_filter.get_timeout_remaining()
+            if select_timeout < 0:
+                select_timeout = 0.5  # 默认超时
+            else:
+                select_timeout = min(select_timeout + 0.01, 0.5)  # 稍微多等一点，避免频繁唤醒
+            
+            events = sel.select(timeout=select_timeout)
+            
+            # 检查超时，透传缓存数据
+            timeout_data = string_filter.check_timeout()
+            if timeout_data:
+                dump_bytes("TIMEOUT (flushing buffer)", timeout_data)
+                try:
+                    os.write(pty_master, timeout_data)
+                except OSError:
+                    pass
+            
             for key, _mask in events:
                 if key.data == "ser":
                     try:
