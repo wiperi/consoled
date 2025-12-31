@@ -14,8 +14,8 @@ import signal
 import termios
 import tty
 import fcntl
-import time
 import logging
+from typing import Optional
 
 import redis.asyncio as aioredis
 
@@ -86,7 +86,6 @@ class StringFilter:
         self.failure = self._compute_failure(pattern)
         self.match_pos = 0
         self.buffer = bytearray()
-        self.last_data_time = 0.0
 
     @staticmethod
     def _compute_failure(pattern: bytes) -> list:
@@ -103,7 +102,6 @@ class StringFilter:
 
     def process(self, data: bytes) -> bytes:
         output = bytearray()
-        self.last_data_time = time.monotonic()
 
         for byte in data:
             while self.match_pos > 0 and byte != self.pattern[self.match_pos]:
@@ -123,17 +121,6 @@ class StringFilter:
 
         return bytes(output)
 
-    def check_timeout(self) -> bytes:
-        """如果超时且 buffer 非空，返回 buffer 内容并清空"""
-        if self.buffer and self.last_data_time > 0:
-            if time.monotonic() - self.last_data_time >= FILTER_TIMEOUT:
-                result = bytes(self.buffer)
-                self.buffer.clear()
-                self.match_pos = 0
-                self.last_data_time = 0.0
-                return result
-        return b""
-
     def flush(self) -> bytes:
         result = bytes(self.buffer)
         self.buffer.clear()
@@ -152,13 +139,13 @@ class SerialProxy:
         self.baud = baud
         self.loop = loop
 
-        self.ser_fd = -1
-        self.pty_master = -1
-        self.pty_slave = -1
-        self.pty_name = ""
-        self.filter = None
-        self.running = False
-        self._timeout_handle = None  # 独立超时定时器
+        self.ser_fd: int = -1
+        self.pty_master: int = -1
+        self.pty_slave: int = -1
+        self.pty_name: str = ""
+        self.filter: Optional[StringFilter] = None
+        self.running: bool = False
+        self._timeout_handle: Optional[asyncio.TimerHandle] = None
 
     def start(self) -> bool:
         try:
@@ -224,7 +211,7 @@ class SerialProxy:
         log.info(f"[{self.link_id}] Stopped")
 
     def _on_serial_read(self) -> None:
-        if not self.running:
+        if not self.running or not self.filter:
             return
         try:
             data = os.read(self.ser_fd, 4096)
@@ -278,11 +265,11 @@ class SerialProxy:
 
 class ProxyManager:
     def __init__(self):
-        self.loop = None
-        self.redis = None
-        self.pubsub = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.redis: Optional[aioredis.Redis] = None  # aioredis.Redis
+        self.pubsub: Optional[aioredis.PubSub] = None  # aioredis.client.PubSub
         self.proxies: dict[str, SerialProxy] = {}  # link_id -> proxy
-        self.running = False
+        self.running: bool = False
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -292,7 +279,7 @@ class ProxyManager:
             host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB,
             decode_responses=True
         )
-        await self.redis.ping()
+        await self.redis.ping() # type: ignore
         log.info(f"Connected to Redis db={REDIS_DB}")
 
         # 初始同步
@@ -308,6 +295,9 @@ class ProxyManager:
 
     async def run(self) -> None:
         """主循环：监听 Redis 事件"""
+        if not self.pubsub:
+            return
+
         while self.running:
             msg = await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
             if msg:
@@ -316,13 +306,16 @@ class ProxyManager:
 
     async def sync(self) -> None:
         """同步 Redis 配置和实际 proxy"""
+        if not self.redis or not self.loop:
+            return
+
         # 获取 Redis 中的配置
-        keys = await self.redis.keys(KEY_PATTERN)
-        redis_configs = {}
+        keys: list[str] = await self.redis.keys(KEY_PATTERN)
+        redis_configs: dict[str, dict] = {}
 
         for key in keys:
             link_id = key.split("|", 1)[-1]
-            data = await self.redis.hgetall(key)
+            data = await self.redis.hgetall(key) # type: ignore
             if data:
                 redis_configs[link_id] = {
                     "baud": int(data.get("baud_rate", 9600)),
