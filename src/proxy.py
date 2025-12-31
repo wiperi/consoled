@@ -158,6 +158,7 @@ class SerialProxy:
         self.pty_name = ""
         self.filter = None
         self.running = False
+        self._timeout_handle = None  # 独立超时定时器
 
     def start(self) -> bool:
         try:
@@ -192,6 +193,11 @@ class SerialProxy:
     def stop(self) -> None:
         self.running = False
 
+        # 取消超时定时器
+        if self._timeout_handle:
+            self._timeout_handle.cancel()
+            self._timeout_handle = None
+
         for fd in (self.ser_fd, self.pty_master):
             if fd >= 0:
                 try:
@@ -223,11 +229,37 @@ class SerialProxy:
         try:
             data = os.read(self.ser_fd, 4096)
             if data:
+                # 取消旧的超时定时器
+                if self._timeout_handle:
+                    self._timeout_handle.cancel()
+                    self._timeout_handle = None
+
                 filtered = self.filter.process(data)
                 if filtered:
                     os.write(self.pty_master, filtered)
+
+                # 如果 buffer 非空，设置新的超时定时器
+                if self.filter.buffer:
+                    self._timeout_handle = self.loop.call_later(
+                        FILTER_TIMEOUT,
+                        self._on_timeout
+                    )
         except (BlockingIOError, OSError):
             pass
+
+    def _on_timeout(self) -> None:
+        """超时回调：透传 buffer 中的数据"""
+        self._timeout_handle = None
+        if not self.running or not self.filter:
+            return
+        if self.filter.buffer and self.pty_master >= 0:
+            data = self.filter.flush()
+            if data:
+                try:
+                    os.write(self.pty_master, data)
+                    log.debug(f"[{self.link_id}] Timeout flush: {data!r}")
+                except OSError:
+                    pass
 
     def _on_pty_read(self) -> None:
         if not self.running:
@@ -275,30 +307,12 @@ class ProxyManager:
         self.running = True
 
     async def run(self) -> None:
-        """主循环：监听 Redis 事件 + 超时检查"""
+        """主循环：监听 Redis 事件"""
         while self.running:
-            # 检查 Redis 事件
-            msg = await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
+            msg = await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
             if msg:
                 log.info(f"Redis event: {msg.get('data')} on {msg.get('channel')}")
                 await self.sync()
-
-            # 超时检查
-            self._check_timeouts()
-
-            await asyncio.sleep(0.1)
-
-    def _check_timeouts(self) -> None:
-        """检查所有 proxy 的超时"""
-        for proxy in self.proxies.values():
-            if proxy.running and proxy.filter:
-                timeout_data = proxy.filter.check_timeout()
-                if timeout_data and proxy.pty_master >= 0:
-                    try:
-                        os.write(proxy.pty_master, timeout_data)
-                        log.debug(f"[{proxy.link_id}] Timeout flush: {timeout_data!r}")
-                    except OSError:
-                        pass
 
     async def sync(self) -> None:
         """同步 Redis 配置和实际 proxy"""
