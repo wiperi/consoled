@@ -1,0 +1,25 @@
+{
+    "channels": [
+        {
+            "name": "console-1",
+            "device": "/dev/C0-1",
+            "baud": 9600,
+            "filter": "password",
+            "timeout": 0.1
+        },
+        {
+            "name": "console-2",
+            "device": "/dev/C0-2",
+            "baud": 9600,
+            "filter": "secret",
+            "timeout": 0.1
+        },
+        {
+            "name": "console-3",
+            "device": "/dev/C0-3",
+            "baud": 115200,
+            "filter": "admin123",
+            "timeout": 0.2
+        }
+    ]
+}
