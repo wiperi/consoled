@@ -37,7 +37,7 @@ Proxy (DCE 侧代理进程):
     心跳帧格式
         使用特定的不可打印字符串作为心跳包，避开了ascii字符集和UTF-8编码的常用字符范围，降低了碰撞概率。
 
-        F4 9B 2D C7
+        F4 9B 2D C7 8E A1 5F 93
 
 ### DTE侧
 
@@ -60,6 +60,9 @@ Proxy (DCE 侧代理进程):
 
 
 ### DCE侧设计
+
+    拓扑
+        每条链路独立的 Proxy 实例，负责该链路的串口读写与状态维护。
 
     超时判定
         默认15秒未收到心跳包，判定链路不可用（Oper Down）
@@ -91,6 +94,27 @@ Proxy (DCE 侧代理进程):
 
         last_heartbeat_time 初始化为now，避免假down/up
 
+    配置更改
+        监听 CONFIG_DB 中的 consoled 配置变更事件，动态增删重启链路的 Proxy 实例。
+
+## 数据库更改
+
+### STATE_DB
+
+Key： "CONSOLED_PORT|<link_id> "
+new field: "oper_status", value: "UP"/"DOWN"
+new field: "last_heartbeat_time", value: "<timestamp>"
+
+## CLI
+
+现在show line命令增加对链路Oper状态的显示：
+
+```
+Line    Baud    Flow Control    PID    Start Time      Device    Oper Status    Last Heartbeat
+------  ------  --------------  -----  ------------  ----------  -------------  ----------------
+     1    9600        Disabled   1234  Jan 15 10:23   Terminal1             UP  Jan 15 14:32:18
+     2    9600        Disabled   5678  Jan 15 10:24   Terminal2           DOWN  Jan 15 14:30:45
+```
         
 
     
