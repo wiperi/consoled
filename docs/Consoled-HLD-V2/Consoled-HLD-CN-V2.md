@@ -1,3 +1,19 @@
+# SONiC Console Monitor
+
+# High Level Design Document
+
+#### Revision 1.0
+
+# Table of Contents
+
+# List of Tables
+
+# Revision
+
+# Scope
+
+# Definition/Abbreviation
+
 ## 功能概述
 
 在数据中心网络中，C0（Console Server, DCE）通过串口直连多台 DTE（SONiC Switch），用于故障时的带外管理与控制台接入。希望实现 consoled 来提供“链路 Oper 状态”探测，并满足：
@@ -8,6 +24,9 @@
 
 高可用与持久化（HA & Persistence）：进程/系统重启后可恢复；对端重启可自动恢复探测。
 
+https://chatgpt.com/c/6954b5ab-61bc-8322-8366-aa8988e60544
+https://gemini.google.com/app/c1e0e9eddec19e4c
+
 ## 设计概述
 
 ![ConsoledArchitecture](ConsoledArchitecture.png)
@@ -17,7 +36,7 @@
 DTE (被管理设备): 
     周期性向串口发送特定格式的心跳包（Heartbeat）。
     note：DTE -> DCE 的单向数据流，保证了在DTE重启阶段，不会收到任何来自DCE侧协议的干扰数据。
-    风险：有一定的概率，正常数据流中包含心跳帧格式的数据，导致这部分正常数据被误判为心跳帧而丢弃。可以通过心跳帧设计来降低碰撞概率。
+    风险：有一定的概率，正常数据流中包含心跳帧格式的数据，导致这部分正常数据被误判为心跳帧而丢弃。可以通过心跳帧设计来降低碰撞概率。https://chatgpt.com/c/6954cb06-45e8-8323-9b6f-7d357ab40fff, https://chatgpt.com/c/6954d376-4470-8323-8fd1-7b5836e775db
 
 Proxy (DCE 侧代理进程):
     独占权: 唯一直接打开并持有物理串口文件描述符（/dev/ttyUSBx）的进程。
@@ -39,7 +58,9 @@ Proxy (DCE 侧代理进程):
 
         F4 9B 2D C7 8E A1 5F 93
 
-### DTE侧
+    https://chatgpt.com/c/6954bc16-f910-8322-bd6c-8005a6ec189a
+
+### DTE侧 console-heartbeat@ttyS0.service
 
     发送周期
         默认5秒发送一次心跳包
@@ -58,19 +79,23 @@ Proxy (DCE 侧代理进程):
 
         该服务负责向指定串口周期性发送心跳包。
 
+        https://chatgpt.com/c/6954d8b0-a72c-8323-b3d7-be5033eb7f87
 
-### DCE侧设计
+
+### DCE侧设计 console-monitor.service
 
     拓扑
+        ![ConsoleMonitorStructure](ConsoleMonitorStructure.png)
+
         每条链路独立的 Proxy 实例，负责该链路的串口读写与状态维护。
 
     超时判定
         默认15秒未收到心跳包，判定链路不可用（Oper Down）
 
     心跳帧检测与过滤
-        为了应对read调用可能读取到部分心跳包的情况，设计了一个滑动缓冲区（sliding buffer），用于存储最近读取的字节流。
+        为了应对read调用可能读取到部分心跳包的情况，借鉴KMP算法，设计了一个滑动缓冲区（sliding buffer），用于存储最近读取的字节流。
 
-        buffer size = heartbea length
+        buffer size = heartbeat length - 1
 
         每次从串口读取数据后，将数据追加到滑动缓冲区的末尾，并检查缓冲区中是否包含完整的心跳包。
 
@@ -85,7 +110,7 @@ Proxy (DCE 侧代理进程):
 
         定时任务：每15s检查 now - last_heartbeat_time > timeout => oper_state = Down
 
-        状态变更写入 STATE_DB, key: "CONSOLED_PORT|<link_id> ", field: "oper_status", value: "UP"/"DOWN"
+        状态变更写入 STATE_DB, key: "CONSOLED_PORT|<link_id> ", field: "oper_state", value: "up"/"down"
 
     启动与重启
         在 config-setup.service之后启动 consoled 服务。读取 CONFIG_DB 中的配置，初始化各串口的 Proxy 实例。
@@ -102,8 +127,8 @@ Proxy (DCE 侧代理进程):
 ### STATE_DB
 
 Key： "CONSOLED_PORT|<link_id> "
-new field: "oper_status", value: "UP"/"DOWN"
-new field: "last_heartbeat_time", value: "<timestamp>"
+new field: "oper_state", value: "up"/"down"
+new field: "last_heartbeat", value: "<timestamp>"
 
 ## CLI
 
@@ -115,6 +140,9 @@ Line    Baud    Flow Control    PID    Start Time      Device    Oper Status    
      1    9600        Disabled   1234  Jan 15 10:23   Terminal1             UP  Jan 15 14:32:18
      2    9600        Disabled   5678  Jan 15 10:24   Terminal2           DOWN  Jan 15 14:30:45
 ```
-        
+
+## Flow Diagrams
+
+# Reference
 
     
