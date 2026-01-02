@@ -1,0 +1,17 @@
+[Unit]
+Description=Console Heartbeat Service on %I
+Documentation=man:systemd-getty-generator(8)
+After=dev-%i.device systemd-user-sessions.service
+Wants=dev-%i.device
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/console-heartbeat-daemon %I %i
+Restart=always
+RestartSec=5
+
+# 环境文件用于传递波特率（由generator生成）
+EnvironmentFile=-/run/console-heartbeat/%I.conf
+
+[Install]
+WantedBy=multi-user.target

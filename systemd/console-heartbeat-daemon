@@ -1,0 +1,48 @@
+#!/bin/bash
+# console-heartbeat-daemon
+# 
+# 守护进程脚本，每隔5秒向指定串口发送 "hello"
+# 
+# 用法: console-heartbeat-daemon <TTY_NAME> <TTY_ESCAPED_NAME>
+#   例如: console-heartbeat-daemon ttyS0 ttyS0
+#
+# 放置位置: /usr/local/bin/console-heartbeat-daemon
+
+set -e
+
+TTY_NAME="$1"
+TTY_ESCAPED="$2"
+
+# 设备路径
+DEVICE="/dev/${TTY_NAME}"
+
+# 从环境文件读取配置（如果存在）
+CONF_FILE="/run/console-heartbeat/${TTY_NAME}.conf"
+if [[ -f "$CONF_FILE" ]]; then
+    source "$CONF_FILE"
+fi
+
+# 默认波特率
+BAUDRATE="${BAUDRATE:-9600}"
+
+# 检查设备是否存在
+if [[ ! -c "$DEVICE" ]]; then
+    echo "Error: Device $DEVICE does not exist or is not a character device"
+    exit 1
+fi
+
+echo "Starting console-heartbeat-daemon on $DEVICE"
+
+# 主循环：每5秒发送一次 "hello"
+while true; do
+    # 发送 "hello"（不加换行符）
+    printf "hello" > "$DEVICE" 2>/dev/null || {
+        echo "Warning: Failed to write to $DEVICE"
+    }
+    
+    # 记录日志（可选）
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Sent 'hello' to $DEVICE"
+    
+    # 等待5秒
+    sleep 5
+done

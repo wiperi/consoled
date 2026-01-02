@@ -56,12 +56,12 @@ This document describes the high-level design of the SONiC Console Monitor (cons
 
 ## 1. Feature Overview
 
-In data center networks, Console Servers (C0/DCE) are directly connected to multiple SONiC Switches (DTE) via serial ports for out-of-band management and console access during failures. The consoled service provides link operational status detection with the following capabilities:
+In data center networks, Console Servers (DCE) are directly connected to multiple SONiC Switches (DTE) via serial ports for out-of-band management and console access during failures. The consoled service provides link operational status detection with the following capabilities:
 
 ### 1.1 Functional Requirements
 
-1. **Connectivity Detection (Heartbeat)**: Determine whether the C0 ↔ DTE serial link is available (Oper Up/Down)
-2. **Non-Interference**: Must not affect normal console operations (emergency access has the highest priority)
+1. **Connectivity Detection (Heartbeat)**: Determine whether the DCE ↔ DTE serial link is available (Oper Up/Down)
+2. **Non-Interference**: Must not affect normal console operations, including remote device cold restart and system reinstallation.
 3. **High Availability & Persistence**: State recovery after process/system restart; automatic detection recovery after remote device restart
 
 ### 1.2 Design Goals
@@ -70,7 +70,7 @@ In data center networks, Console Servers (C0/DCE) are directly connected to mult
 |---------------------|--------------------------------------------------------------------------|
 | Reliability         | Accurate link status detection with minimal false positives/negatives   |
 | Non-intrusive       | Zero impact on normal console operations                                |
-| Low Overhead        | Minimal resource consumption and bandwidth usage                        |
+| Low Overhead        | Minimal resource consumption and user-side latency                      |
 | Automatic Recovery  | Self-healing after restarts on either side                              |
 
 ---
@@ -87,24 +87,21 @@ The core design transforms the direct "User ↔ Serial Port" access model into a
 
 The DTE periodically sends heartbeat frames with a specific format to the serial port.
 
-**Key Characteristics:**
+**Characteristics:**
 
-- **Unidirectional Data Flow**: DTE → DCE only, ensuring no interference from DCE-side protocol data during DTE reboot phase
+- **One-way Data Flow**: DTE → DCE only, ensuring no interference from DCE-side protocol data during DTE reboot phase
 - **Collision Risk Mitigation**: There is a small probability that normal data streams may contain heartbeat frame patterns, causing false detection. This risk is minimized through careful heartbeat frame design
 
 ### 2.3 DCE Side (Proxy Process)
 
-The Proxy process on the DCE side serves as the intermediary between applications and the physical serial port.
+Create a proxy between each physical serial port and user applicationd. The proxy responsible for heartbeat frame detection, filtering from the serial data stream, and maintaining link operational state.
 
-**Responsibilities:**
+**Characteristics:**
 
-| Function           | Description                                                                         |
-|--------------------|-------------------------------------------------------------------------------------|
-| Exclusive Access   | Sole process holding the physical serial port file descriptor (`/dev/ttyUSBx`)     |
-| PTY Creation       | Creates a virtual serial port (pseudo-terminal) for upper-layer applications       |
-| Flow Control       | Real-time scanning of serial port input stream                                      |
-| Heartbeat Filtering| Identifies heartbeat frames, updates state, and discards them                       |
-| Data Passthrough   | Transparently forwards non-heartbeat data to the virtual serial port               |
+- **Exclusive Access**: Sole process holding the physical serial port file descriptor (`/dev/ttyUSBx`)
+- **PTY Creation**: Creates a virtual serial port for upper-layer applications
+- **Heartbeat Filtering**: Identifies heartbeat frames, updates state, and discards them
+- **Data Passthrough**: Transparently forwards non-heartbeat data to the virtual serial port
 
 ---
 
@@ -119,7 +116,7 @@ The Proxy process on the DCE side serves as the intermediary between application
 
 #### 3.1.2 Frame Format
 
-The heartbeat frame uses a specific sequence of non-printable characters, avoiding the common ASCII and UTF-8 character ranges to reduce collision probability.
+The heartbeat frame uses a specific sequence of non-printable characters, avoiding the common ASCII character to reduce collision probability.
 
 **Heartbeat Byte Sequence:**
 
@@ -144,25 +141,17 @@ F4 9B 2D C7 8E A1 5F 93
 
 #### 3.2.1 Service: `console-heartbeat@ttyS0.service`
 
-**Configuration:**
+The DTE side service periodically sends heartbeat frames to the serial port with a fixed 5-second interval.
 
-| Parameter       | Default Value | Description                              |
-|-----------------|---------------|------------------------------------------|
-| Send Interval   | 5 seconds     | Heartbeat transmission period            |
+**Key Characteristics:**
 
-#### 3.2.2 Write Operation Risks and Mitigations
+- **Send Interval**: Fixed at 5 seconds (not configurable)
+- **Service Instance**: Generated per serial port using systemd template units
+- **Automatic Activation**: Created by systemd generator based on kernel command line parameters
 
-| Risk                    | Description                                                        | Mitigation                           |
-|-------------------------|--------------------------------------------------------------------|--------------------------------------|
-| Partial Write (Non-blocking) | Kernel send buffer full may cause incomplete write           | Use blocking mode with proper handling |
-| Signal Interruption     | Write call may be interrupted by signals during blocking mode     | Implement retry logic                |
+#### 3.2.2 Service Startup and Management
 
-#### 3.2.3 Service Startup and Management
-
-- **Automatic Instance Generation**: Uses systemd generator to automatically create `console-monitor@.service` instances
-- **Configuration Source**: Serial port list passed via kernel command line parameters
-- **Service Location**: Generated wants links in `/run/systemd/generator/`
-- **Function**: Periodically sends heartbeat frames to the specified serial port
+The DTE side service uses a systemd generator to automatically create `console-heartbeat@.service` instances based on serial port configurations passed via kernel command line parameters. The generator reads these parameters and creates corresponding service instance wants links in `/run/systemd/generator/`, enabling each service instance to periodically send heartbeat frames to its designated serial port without manual configuration.
 
 ---
 

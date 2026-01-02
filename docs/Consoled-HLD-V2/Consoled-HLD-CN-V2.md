@@ -29,6 +29,43 @@ https://gemini.google.com/app/c1e0e9eddec19e4c
 
 ## 设计概述
 
+
+```mermaid
+---
+config:
+  look: neo
+  theme: redux
+---
+flowchart LR
+  subgraph DCE["DCE (Console Server)"]
+    proxy_dce["proxy"]
+    picocom["picocom (user)"]
+    pty_master["pty_master"]
+    pty_slave["pty_slave"]
+    TTY_DCE["/dev/tty_dce (physical serial)"]
+  end
+
+  subgraph DTE["DTE (SONiC Switch)"]
+    serial_getty["serial-getty@tty_dte.service"]
+    hb_sender["console-monitor.service"]
+    TTY_DTE["/dev/tty_dte (physical serial)"]
+  end
+
+  %% DTE side: services attached to the physical serial
+  serial_getty <-- read/write --> TTY_DTE
+  hb_sender -- heartbeat --> TTY_DTE
+
+  %% physical link
+  TTY_DCE <-- serial link --> TTY_DTE
+
+  %% DCE side: proxy owns serial, filters RX, bridges to PTY for user tools
+  TTY_DCE <-- read/write --> proxy_dce
+  proxy_dce -- filter heartbeat and forward --> pty_master
+  pty_master -- forward --> proxy_dce
+  pty_master <-- PTY pair --> pty_slave
+  picocom <-- interactive session --> pty_slave
+```
+
 ![ConsoledArchitecture](ConsoledArchitecture.png)
 
 设计核心在于在DTE侧，将直接的“用户 <-> 串口”访问模式转变为“用户 <-> Proxy <-> 串口”模式。
