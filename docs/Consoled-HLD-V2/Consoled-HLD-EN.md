@@ -79,27 +79,54 @@ In data center networks, Console Servers (DCE) are directly connected to multipl
 
 ### 2.1 Architecture
 
-![Consoled Architecture](ConsoledArchitecture.png)
+```mermaid
+flowchart LR
+  subgraph DCE["DCE (Console Server)"]
+    proxy_dce["proxy"]
+    picocom["picocom (user)"]
+    pty_master["pty_master"]
+    pty_slave["pty_slave"]
+    TTY_DCE["/dev/tty_dce (physical serial)"]
+  end
+
+  subgraph DTE["DTE (SONiC Switch)"]
+    serial_getty["serial-getty@tty_dte.service"]
+    hb_sender["console-monitor.service"]
+    TTY_DTE["/dev/tty_dte (physical serial)"]
+  end
+
+  %% DTE side: services attached to the physical serial
+  serial_getty <-- read/write --> TTY_DTE
+  hb_sender -- heartbeat --> TTY_DTE
+
+  %% physical link
+  TTY_DCE <-- serial link --> TTY_DTE
+
+  %% DCE side: proxy owns serial, filters RX, bridges to PTY for user tools
+  TTY_DCE <-- read/write --> proxy_dce
+  proxy_dce -- filter heartbeat and forward --> pty_master
+  pty_master -- forward --> proxy_dce
+  pty_master <-- PTY pair --> pty_slave
+  picocom <-- interactive session --> pty_slave
+```
 
 The core design transforms the direct "User ↔ Serial Port" access model into a "User ↔ Proxy ↔ Serial Port" model on the DCE side.
 
-### 2.2 DTE Side (Managed Device)
+### 2.2 DTE Side
 
 The DTE periodically sends heartbeat frames with a specific format to the serial port.
 
-**Characteristics:**
 
 - **One-way Data Flow**: DTE → DCE only, ensuring no interference from DCE-side protocol data during DTE reboot phase
 - **Collision Risk Mitigation**: There is a small probability that normal data streams may contain heartbeat frame patterns, causing false detection. This risk is minimized through careful heartbeat frame design
 
-### 2.3 DCE Side (Proxy Process)
+### 2.3 DCE Side
 
 Create a proxy between each physical serial port and user applicationd. The proxy responsible for heartbeat frame detection, filtering from the serial data stream, and maintaining link operational state.
 
-**Characteristics:**
 
 - **Exclusive Access**: Sole process holding the physical serial port file descriptor (`/dev/ttyUSBx`)
-- **PTY Creation**: Creates a virtual serial port for upper-layer applications
+- **PTY Creation**: Creates a virtual serial port for upper-layer applications (e.g., consutil, picocom)
 - **Heartbeat Filtering**: Identifies heartbeat frames, updates state, and discards them
 - **Data Passthrough**: Transparently forwards non-heartbeat data to the virtual serial port
 
@@ -116,42 +143,57 @@ Create a proxy between each physical serial port and user applicationd. The prox
 
 #### 3.1.2 Frame Format
 
-The heartbeat frame uses a specific sequence of non-printable characters, avoiding the common ASCII character to reduce collision probability.
+The heartbeat frame uses a 4-byte sequence of unused Extended ASCII codes (0x80-0x9F range), which are rarely used in normal terminal output, reducing collision probability.
 
 **Heartbeat Byte Sequence:**
 
 ```
-F4 9B 2D C7 8E A1 5F 93
+8D 90 8F 9D
 ```
 
-| Byte Position | Value (Hex) |
-|---------------|-------------|
-| 0             | F4          |
-| 1             | 9B          |
-| 2             | 2D          |
-| 3             | C7          |
-| 4             | 8E          |
-| 5             | A1          |
-| 6             | 5F          |
-| 7             | 93          |
+| Byte Position | Value (Hex) | Description                          |
+|---------------|-------------|--------------------------------------|
+| 0             | 8D          | Unused Extended ASCII   |
+| 1             | 90          | Unused Extended ASCII   |
+| 2             | 8F          | Unused Extended ASCII   |
+| 3             | 9D          | Unused Extended ASCII   |
 
 ---
 
 ### 3.2 DTE Side Service
 
-#### 3.2.1 Service: `console-heartbeat@ttyS0.service`
+#### 3.2.1 Service: `console-heartbeat@<DEVICE_NAME>.service`
 
 The DTE side service periodically sends heartbeat frames to the serial port with a fixed 5-second interval.
 
 **Key Characteristics:**
 
-- **Send Interval**: Fixed at 5 seconds (not configurable)
+- **Send Interval**: Fixed at 5 seconds
 - **Service Instance**: Generated per serial port using systemd template units
 - **Automatic Activation**: Created by systemd generator based on kernel command line parameters
 
 #### 3.2.2 Service Startup and Management
 
 The DTE side service uses a systemd generator to automatically create `console-heartbeat@.service` instances based on serial port configurations passed via kernel command line parameters. The generator reads these parameters and creates corresponding service instance wants links in `/run/systemd/generator/`, enabling each service instance to periodically send heartbeat frames to its designated serial port without manual configuration.
+
+```mermaid
+flowchart TD
+  A["Bootloader starts Linux kernel"] --> B["Kernel parses command line"]
+  B --> C["/proc/cmdline becomes available"]
+  C --> D["systemd (PID 1) starts"]
+  D --> E["systemd loads units and runs generators"]
+  E --> F["console-heartbeat-generator runs"]
+  F --> G["generator reads /proc/cmdline"]
+  G --> H["generator finds console=DEVICE,9600"]
+  H --> I["generator creates wants symlink under /run/systemd/generator/multi-user.target.wants"]
+  I --> J["systemd builds dependency graph including generated wants"]
+  J --> K["multi-user.target starts"]
+  K --> L["console-heartbeat@DEVICE.service is pulled in"]
+  L --> M["console-heartbeat@.service template is instantiated"]
+  M --> N["ExecStart runs console-heartbeat-daemon with /dev/DEVICE and baud"]
+  N --> O["daemon opens /dev/DEVICE"]
+  O --> P["every 5s daemon writes HEARTBEAT to /dev/DEVICE"]
+```
 
 ---
 
@@ -167,13 +209,11 @@ Each link has an independent Proxy instance responsible for serial port read/wri
 
 #### 3.3.2 Timeout Detection
 
-| Parameter      | Default Value | Description                                           |
-|----------------|---------------|-------------------------------------------------------|
-| Timeout Period | 15 seconds    | Duration without heartbeat before declaring Oper Down |
+The timeout period is set to 15 seconds by default. If no heartbeat is received within this duration, the link operational state is declared as Down.
 
 #### 3.3.3 Heartbeat Frame Detection and Filtering
 
-To handle cases where read() calls may return partial heartbeat frames, a sliding buffer mechanism (inspired by the KMP algorithm) is implemented:
+To handle cases where read() calls may return partial heartbeat frames, a sliding buffer mechanism (similiar to KMP algorithm) is implemented:
 
 **Algorithm:**
 
@@ -186,66 +226,39 @@ To handle cases where read() calls may return partial heartbeat frames, a slidin
 
 **State Diagram:**
 
-```
-┌─────────────────┐
-│   Read Data     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Append to Buffer│
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────────┐     Yes    ┌──────────────────┐
-│ Heartbeat Detected? │───────────►│ Update Timer     │
-└─────────┬───────────┘            │ Flush Buffer     │
-          │ No                     └──────────────────┘
-          ▼
-┌─────────────────────┐     Yes    ┌──────────────────┐
-│ Prefix Match Failed │───────────►│ Clear Buffer     │
-│ OR Buffer Full?     │            │ Passthrough Data │
-└─────────┬───────────┘            └──────────────────┘
-          │ No
-          ▼
-┌─────────────────────┐     Yes    ┌──────────────────┐
-│ Timeout (1s)?       │───────────►│ Passthrough      │
-└─────────┬───────────┘            │ Buffer Contents  │
-          │ No                     └──────────────────┘
-          ▼
-┌─────────────────────┐
-│ Wait for More Data  │
-└─────────────────────┘
+```mermaid
+flowchart TD
+    A["Read Data"] --> B["Append to Buffer"]
+    B --> C{"Heartbeat Detected?"}
+    C -->|Yes| D["Update Timer, Flush Buffer"]
+    C -->|No| E{"Prefix Match Failed OR Buffer Full?"}
+    E -->|Yes| F["Clear Buffer, Passthrough Data"]
+    E -->|No| G{"Timeout 1s?"}
+    G -->|Yes| H["Passthrough Buffer Contents"]
+    G -->|No| I["Wait for More Data"]
 ```
 
 #### 3.3.4 Operational State Determination
 
-Each link maintains independent state:
-
-| Event                        | Action                                                    |
-|------------------------------|-----------------------------------------------------------|
-| Heartbeat Received           | Update heartbeat timer; Set Oper State = Up               |
-| Scheduled Check (every 15s)  | If `now - last_heartbeat_time > timeout` → Oper State = Down |
-| State Change                 | Write to STATE_DB                                         |
+Each link maintains independent state. When a heartbeat is received, the proxy updates the heartbeat timer and sets the oper state to UP. A scheduled check runs every 15 seconds, if no heartbeat has been received within the last 15 seconds, the oper state is set to DOWN. Any state change is written to STATE_DB.
 
 **STATE_DB Entry:**
 
 - **Key**: `CONSOLED_PORT|<link_id>`
-- **Field**: `oper_state`
-- **Value**: `up` / `down`
+- **Field**: `oper_state`, **Value**: `up` / `down`
+- **Field**: `last_heartbeat`, **Value**: `<timestamp>`
 
 #### 3.3.5 Service Startup and Initialization
 
 | Phase              | Action                                                                     |
 |--------------------|----------------------------------------------------------------------------|
-| Startup Timing     | After `config-setup.service`                                               |
+| Startup Timing     | After `config-setup.service` load `config.json` to CONFIG_DB                                               |
 | Configuration      | Read CONFIG_DB, initialize Proxy instances for each serial port            |
-| State Recovery     | If STATE_DB entry exists → Preserve; If not → Initialize as `down`         |
-| Timer Init         | Set `last_heartbeat_time = now` to avoid false down/up transitions         |
+| State Update       | After 15 seconds, `oper_state` and `last_heartbeat` is updated based on heartbeat reception       |
 
 #### 3.3.6 Dynamic Configuration Changes
 
-- Monitor CONFIG_DB for consoled configuration change events
+- Monitor CONFIG_DB for configuration change events
 - Dynamically add, remove, or restart Proxy instances for links
 
 ---
@@ -273,10 +286,12 @@ admin@sonic:~$ show line
 
 **Output:**
 
-| Line | Baud | Flow Control | PID  | Start Time   | Device    | Oper Status | Last Heartbeat   |
-|------|------|--------------|------|--------------|-----------|-------------|------------------|
-| 1    | 9600 | Disabled     | 1234 | Jan 15 10:23 | Terminal1 | UP          | Jan 15 14:32:18  |
-| 2    | 9600 | Disabled     | 5678 | Jan 15 10:24 | Terminal2 | DOWN        | Jan 15 14:30:45  |
+```
+  Line    Baud    Flow Control    PID    Start Time      Device    Oper Status          Last Heartbeat
+------  ------  --------------  -----  ------------  ----------  -------------  ----------------------
+     1    9600        Disabled      -             -   Terminal1             up  12/31/2025 10:11:29 PM
+     2    9600        Disabled      -             -   Terminal2           down                       -
+```
 
 **New Columns:**
 
@@ -289,68 +304,71 @@ admin@sonic:~$ show line
 
 ## 6. Flow Diagrams
 
-### 6.1 Heartbeat Detection Flow
+### 6.1 Heartbeat Frame Detection and Filtering Process
+```mermaid
+sequenceDiagram
+    participant Serial as Serial Port
+    participant Proxy
+    participant Buffer
+    participant PTY
+    participant Timer as Buffer Flush Timer
+    participant HB as Heartbeat Timer
+    participant Redis as STATE_DB
 
-```
-┌─────────┐                              ┌─────────┐
-│   DTE   │                              │   DCE   │
-│ (SONiC  │                              │(Console │
-│ Switch) │                              │ Server) │
-└────┬────┘                              └────┬────┘
-     │                                        │
-     │  ┌──────────────────────────────────┐  │
-     │  │ Every 5 seconds                  │  │
-     │  └──────────────────────────────────┘  │
-     │                                        │
-     │  Heartbeat Frame (8 bytes)             │
-     │ ──────────────────────────────────────►│
-     │                                        │
-     │                                   ┌────┴────┐
-     │                                   │ Proxy   │
-     │                                   │ Process │
-     │                                   └────┬────┘
-     │                                        │
-     │                              ┌─────────┴─────────┐
-     │                              │ 1. Detect Frame   │
-     │                              │ 2. Update Timer   │
-     │                              │ 3. Update STATE_DB│
-     │                              │ 4. Discard Frame  │
-     │                              └───────────────────┘
-     │                                        │
-```
+    Note over Serial,Redis: Case 1: Full Match
+    Serial->>Proxy: read() returns bytes
+    Proxy->>Buffer: append bytes
+    Proxy->>Proxy: check pattern match
+    Proxy-->>Proxy: full match detected
+    Proxy->>HB: reset heartbeat timer (15s)
+    Proxy->>Redis: update oper_state=UP, last_heartbeat=now
+    Proxy->>Buffer: clear buffer
+    Note over Buffer: heartbeat bytes discarded
 
-### 6.2 Timeout Detection Flow
+    Note over Serial,Redis: Case 2: Prefix Match (partial)
+    Serial->>Proxy: read() returns bytes
+    Proxy->>Buffer: append bytes
+    Proxy->>Proxy: check pattern match
+    Proxy-->>Proxy: prefix match (waiting for more)
+    Proxy->>Timer: start timeout timer (1s)
+    Note over Proxy: waiting for next read...
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                   DCE Proxy Process                      │
-├─────────────────────────────────────────────────────────┤
-│                                                          │
-│  ┌────────────────────────────────────────────────────┐ │
-│  │            Periodic Check (every 15s)              │ │
-│  └────────────────────┬───────────────────────────────┘ │
-│                       │                                  │
-│                       ▼                                  │
-│  ┌────────────────────────────────────────────────────┐ │
-│  │     now - last_heartbeat_time > 15s ?              │ │
-│  └────────────────────┬───────────────────────────────┘ │
-│                       │                                  │
-│            ┌──────────┴──────────┐                      │
-│            │ Yes                 │ No                   │
-│            ▼                     ▼                      │
-│  ┌─────────────────┐   ┌─────────────────┐             │
-│  │ oper_state=DOWN │   │ oper_state=UP   │             │
-│  │ Update STATE_DB │   │ (no change)     │             │
-│  └─────────────────┘   └─────────────────┘             │
-│                                                          │
-└─────────────────────────────────────────────────────────┘
+    Note over Serial,Redis: Case 2a: Prefix Match completes
+    Serial->>Proxy: read() returns remaining bytes
+    Proxy->>Timer: cancel timeout timer
+    Proxy->>Buffer: append bytes
+    Proxy->>Proxy: check pattern match
+    Proxy-->>Proxy: full match detected
+    Proxy->>HB: reset heartbeat timer (15s)
+    Proxy->>Redis: update oper_state=UP, last_heartbeat=now
+    Proxy->>Buffer: clear buffer
+
+    Note over Serial,Redis: Case 2b: Timeout before completion
+    Timer-->>Proxy: timeout triggered (1s elapsed)
+    Proxy->>PTY: flush buffer content
+    Proxy->>Buffer: clear buffer and reset match position
+
+    Note over Serial,Redis: Case 3: Prefix Mismatch
+    Serial->>Proxy: read() returns bytes
+    Proxy->>Buffer: append bytes
+    Proxy->>Proxy: check pattern match
+    Proxy-->>Proxy: prefix mismatch at position N
+    Proxy->>PTY: output non-matching prefix bytes
+    Proxy->>Buffer: remove output bytes, keep remaining
+    Proxy->>Proxy: continue matching
+
+    Note over Serial,Redis: Case 4: Heartbeat Timeout
+    HB-->>HB: 15s elapsed without reset
+    HB->>Redis: update oper_state=DOWN
+    Note over Redis: last_heartbeat unchanged
 ```
 
 ---
 
 ## 7. References
 
-1. [SONiC Console Switch High Level Design](../SONiC-Console-Switch-High-Level-Design.md)
-2. SONiC Architecture Documentation
-3. Linux Serial Programming Guide
-4. Systemd Generator Documentation
+1. [SONiC Console Switch High Level Design](https://github.com/sonic-net/SONiC/blob/master/doc/console/SONiC-Console-Switch-High-Level-Design.md#scope)
+2. [Systemd Generator Man Page](https://www.freedesktop.org/software/systemd/man/systemd.generator.html)
+3. [Systemd Getty Generator Source Code](https://github.com/systemd/systemd/blob/main/src/getty-generator/getty-generator.c)
+4. [Getty Explanation](https://0pointer.de/blog/projects/serial-console.html)
+5. [ASCII Code](https://www.ascii-code.com/)
