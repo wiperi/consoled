@@ -122,11 +122,11 @@ The DTE periodically sends heartbeat frames with a specific format to the serial
 
 ### 2.3 DCE Side
 
-Create a proxy between each physical serial port and user applicationd. The proxy responsible for heartbeat frame detection, filtering from the serial data stream, and maintaining link operational state.
-
+Create a proxy between each physical serial port and user applications. The proxy is responsible for heartbeat frame detection, filtering from the serial data stream, and maintaining link operational state.
 
 - **Exclusive Access**: Sole process holding the physical serial port file descriptor (`/dev/ttyUSBx`)
-- **PTY Creation**: Creates a virtual serial port for upper-layer applications (e.g., consutil, picocom)
+- **PTY Creation**: Creates a pseudo-terminal pair for upper-layer applications
+- **PTY Symlink**: Creates a fixed symbolic link (e.g., `/dev/VC0-1`) pointing to the dynamic PTY slave (e.g., `/dev/pts/3`), allowing upper-layer applications (consutil, picocom) to use a stable device path
 - **Heartbeat Filtering**: Identifies heartbeat frames, updates state, and discards them
 - **Data Passthrough**: Transparently forwards non-heartbeat data to the virtual serial port
 
@@ -250,11 +250,21 @@ Each link maintains independent state. When a heartbeat is received, the proxy u
 
 #### 3.3.5 Service Startup and Initialization
 
-| Phase              | Action                                                                     |
-|--------------------|----------------------------------------------------------------------------|
-| Startup Timing     | After `config-setup.service` load `config.json` to CONFIG_DB                                               |
-| Configuration      | Read CONFIG_DB, initialize Proxy instances for each serial port            |
-| State Update       | After 15 seconds, `oper_state` and `last_heartbeat` is updated based on heartbeat reception       |
+The console-monitor service follows this startup sequence:
+
+1. **Wait for Dependencies**: Start after `config-setup.service` completes loading `config.json` to CONFIG_DB
+2. **Read PTY Symlink Prefix**: Read device prefix from `<platform_path>/udevprefix.conf` (e.g., `C0-`), construct virtual device prefix as `/dev/V<prefix>` (e.g., `/dev/VC0-`)
+3. **Connect to Redis**: Establish connections to CONFIG_DB and STATE_DB
+4. **Initialize Proxy Instances**: For each serial port configuration in CONFIG_DB:
+   - Open physical serial port (e.g., `/dev/C0-1`)
+   - Create PTY (e.g. `/dev/pts/X`)
+   - Create symlink from fixed path to dynamic PTY (e.g., `/dev/VC0-1` → `/dev/pts/3`)
+   - Configure serial port and PTY with raw mode settings
+   - Register file descriptors with asyncio event loop
+   - Start heartbeat timeout timer (15 seconds)
+5. **Subscribe to Config Changes**: Monitor CONFIG_DB keyspace events for dynamic reconfiguration
+6. **Enter Main Loop**: Process serial data, filter heartbeats, update STATE_DB
+7. **Initial State**: After 15 seconds without heartbeat, `oper_state` is set to `down`; upon first heartbeat reception, `oper_state` becomes `up` with `last_heartbeat` timestamp
 
 #### 3.3.6 Dynamic Configuration Changes
 

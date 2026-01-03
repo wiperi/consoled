@@ -11,6 +11,7 @@ import os
 import sys
 import asyncio
 import signal
+import subprocess
 import termios
 import tty
 import fcntl
@@ -19,6 +20,7 @@ import logging
 from typing import Optional, Any
 
 import redis.asyncio as aioredis
+from sonic_py_common import device_info
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +44,28 @@ BAUD_MAP = {
     9600: termios.B9600, 19200: termios.B19200, 38400: termios.B38400,
     57600: termios.B57600, 115200: termios.B115200,
 }
+
+
+def get_pty_symlink_prefix() -> str:
+    """从 udevprefix.conf 读取 PTY 符号链接前缀
+    
+    物理串口: /dev/C0-1, /dev/C0-2, ...
+    符号链接: /dev/VC0-1, /dev/VC0-2, ... (V = Virtual)
+    """
+    try:
+        platform_path, _ = device_info.get_paths_to_platform_and_hwsku_dirs()
+        config_file = os.path.join(platform_path, "udevprefix.conf")
+        
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as f:
+                prefix = f.readline().rstrip()
+                # 添加 V 前缀表示 Virtual，避免与物理串口冲突
+                return f"/dev/V{prefix}"
+    except Exception as e:
+        log.warning(f"Failed to read udevprefix.conf: {e}")
+    
+    # 默认前缀
+    return "/dev/VC0-"
 
 
 # ============================================================
@@ -237,17 +261,20 @@ class StringFilter:
 class SerialProxy:
     def __init__(self, link_id: str, device: str, baud: int, 
                  loop: asyncio.AbstractEventLoop,
-                 db: 'DbUtil'):
+                 db: 'DbUtil',
+                 pty_symlink_prefix: str):
         self.link_id = link_id
         self.device = device
         self.baud = baud
         self.loop = loop
         self.db = db
+        self.pty_symlink_prefix = pty_symlink_prefix
 
         self.ser_fd: int = -1
         self.pty_master: int = -1
         self.pty_slave: int = -1
         self.pty_name: str = ""
+        self.pty_symlink: str = ""
         self.filter: Optional[StringFilter] = None
         self.running: bool = False
         self._timeout_handle: Optional[asyncio.TimerHandle] = None
@@ -276,10 +303,13 @@ class SerialProxy:
 
             self.running = True
 
+            # 创建符号链接
+            self._create_symlink()
+
             # 启动心跳超时定时器
             self._reset_heartbeat_timer()
 
-            log.info(f"[{self.link_id}] Started: {self.device} -> {self.pty_name}")
+            log.info(f"[{self.link_id}] Started: {self.device} -> {self.pty_name} ({self.pty_symlink})")
             return True
 
         except Exception as e:
@@ -289,6 +319,9 @@ class SerialProxy:
 
     def stop(self) -> None:
         self.running = False
+
+        # 删除符号链接
+        self._remove_symlink()
 
         # 取消超时定时器
         if self._timeout_handle:
@@ -404,6 +437,30 @@ class SerialProxy:
         except (BlockingIOError, OSError):
             pass
 
+    def _create_symlink(self) -> None:
+        """创建 PTY 符号链接"""
+        self.pty_symlink = f"{self.pty_symlink_prefix}{self.link_id}"
+        try:
+            # 确保目标不存在
+            if os.path.islink(self.pty_symlink) or os.path.exists(self.pty_symlink):
+                os.unlink(self.pty_symlink)
+            os.symlink(self.pty_name, self.pty_symlink)
+            log.info(f"[{self.link_id}] Symlink: {self.pty_symlink} -> {self.pty_name}")
+        except Exception as e:
+            log.error(f"[{self.link_id}] Failed to create symlink: {e}")
+            self.pty_symlink = ""
+
+    def _remove_symlink(self) -> None:
+        """删除 PTY 符号链接"""
+        if self.pty_symlink:
+            try:
+                if os.path.islink(self.pty_symlink):
+                    os.unlink(self.pty_symlink)
+                    log.info(f"[{self.link_id}] Symlink removed: {self.pty_symlink}")
+            except Exception as e:
+                log.error(f"[{self.link_id}] Failed to remove symlink: {e}")
+            self.pty_symlink = ""
+
 
 # ============================================================
 # 代理管理
@@ -415,9 +472,14 @@ class ProxyManager:
         self.db = DbUtil()
         self.proxies: dict[str, SerialProxy] = {}
         self.running: bool = False
+        self.pty_symlink_prefix: str = ""
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
+
+        # 读取 PTY 符号链接前缀
+        self.pty_symlink_prefix = get_pty_symlink_prefix()
+        log.info(f"PTY symlink prefix: {self.pty_symlink_prefix}")
 
         # 连接数据库
         await self.db.connect()
@@ -459,7 +521,8 @@ class ProxyManager:
             cfg = redis_configs[link_id]
             proxy = SerialProxy(
                 link_id, cfg["device"], cfg["baud"], self.loop,
-                db=self.db
+                db=self.db,
+                pty_symlink_prefix=self.pty_symlink_prefix
             )
             if proxy.start():
                 self.proxies[link_id] = proxy
@@ -472,7 +535,8 @@ class ProxyManager:
                 proxy.stop()
                 new_proxy = SerialProxy(
                     link_id, cfg["device"], cfg["baud"], self.loop,
-                    db=self.db
+                    db=self.db,
+                    pty_symlink_prefix=self.pty_symlink_prefix
                 )
                 if new_proxy.start():
                     self.proxies[link_id] = new_proxy
