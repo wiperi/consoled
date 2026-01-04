@@ -16,7 +16,7 @@ TTY_ESCAPED="$2"
 # 设备路径
 DEVICE="/dev/${TTY_NAME}"
 
-# 从环境文件读取配置（如果存在）
+# 从环境文件读取配置
 CONF_FILE="/run/console-heartbeat/${TTY_NAME}.conf"
 if [[ -f "$CONF_FILE" ]]; then
     source "$CONF_FILE"
@@ -35,12 +35,13 @@ echo "Starting console-heartbeat-daemon on $DEVICE"
 
 # 主循环：每5秒发送一次 "hello"
 while true; do
-    # 发送 "hello"（不加换行符）
+    # 发送 "hello"
+    # 为了便于调试，暂时使用hello作为heartbeat内容
     printf "hello" > "$DEVICE" 2>/dev/null || {
         echo "Warning: Failed to write to $DEVICE"
     }
     
-    # 记录日志（可选）
+    # 记录日志
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Sent 'hello' to $DEVICE"
     
     # 等待5秒
