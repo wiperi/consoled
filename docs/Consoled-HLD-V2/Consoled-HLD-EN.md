@@ -253,23 +253,32 @@ Each link maintains independent state. When a heartbeat is received, the proxy u
 The console-monitor service follows this startup sequence:
 
 1. **Wait for Dependencies**: Start after `config-setup.service` completes loading `config.json` to CONFIG_DB
-2. **Read PTY Symlink Prefix**: Read device prefix from `<platform_path>/udevprefix.conf` (e.g., `C0-`), construct virtual device prefix as `/dev/V<prefix>` (e.g., `/dev/VC0-`)
-3. **Connect to Redis**: Establish connections to CONFIG_DB and STATE_DB
-4. **Initialize Proxy Instances**: For each serial port configuration in CONFIG_DB:
+2. **Connect to Redis**: Establish connections to CONFIG_DB and STATE_DB
+3. **Check Console Feature**: Verify `CONSOLE_SWITCH|console_mgmt` field `enabled` is set to `"yes"` in CONFIG_DB; exit immediately if disabled
+4. **Read PTY Symlink Prefix**: Read device prefix from `<platform_path>/udevprefix.conf` (e.g., `C0-`), construct virtual device prefix as `/dev/V<prefix>` (e.g., `/dev/VC0-`)
+5. **Initialize Proxy Instances**: For each serial port configuration in CONFIG_DB:
    - Open physical serial port (e.g., `/dev/C0-1`)
-   - Create PTY (e.g. `/dev/pts/X`)
+   - Create PTY pair (master/slave, e.g., `/dev/pts/X`)
    - Create symlink from fixed path to dynamic PTY (e.g., `/dev/VC0-1` → `/dev/pts/3`)
    - Configure serial port and PTY with raw mode settings
    - Register file descriptors with asyncio event loop
    - Start heartbeat timeout timer (15 seconds)
-5. **Subscribe to Config Changes**: Monitor CONFIG_DB keyspace events for dynamic reconfiguration
-6. **Enter Main Loop**: Process serial data, filter heartbeats, update STATE_DB
-7. **Initial State**: After 15 seconds without heartbeat, `oper_state` is set to `down`; upon first heartbeat reception, `oper_state` becomes `up` with `last_heartbeat` timestamp
+6. **Subscribe to Config Changes**: Monitor CONFIG_DB keyspace events for dynamic reconfiguration
+7. **Enter Main Loop**: Process serial data, filter heartbeats, update STATE_DB
+8. **Initial State**: After 15 seconds without heartbeat, `oper_state` is set to `down`; upon first heartbeat reception, `oper_state` becomes `up` with `last_heartbeat` timestamp
 
 #### 3.3.6 Dynamic Configuration Changes
 
 - Monitor CONFIG_DB for configuration change events
 - Dynamically add, remove, or restart Proxy instances for links
+
+#### 3.3.7 Service Shutdown and Cleanup
+
+When the console-monitor service receives a shutdown signal (SIGINT/SIGTERM), each proxy cleans up:
+
+- **STATE_DB Cleanup**: Delete only `oper_state` and `last_heartbeat` fields (preserve `state`, `pid`, `start_time` fields managed by consutil)
+- **PTY Symlink**: Remove symlink (e.g., `/dev/VC0-1`)
+- **Buffer Flush**: Flush filter buffer to PTY if non-empty
 
 ---
 
