@@ -1,0 +1,18 @@
+[Unit]
+Description=Console Monitor Service - Proxy and Heartbeat Detection
+Documentation=https://github.com/wiperi/consoled
+After=config-setup.service database.service
+Requires=config-setup.service database.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/console-monitor.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+SupplementaryGroups=dialout
+
+[Install]
+WantedBy=multi-user.target
