@@ -106,6 +106,23 @@ class DbUtil:
         if self.state_db:
             await self.state_db.aclose()
     
+    async def check_console_feature_enabled(self) -> bool:
+        """检查 console switch 功能是否启用"""
+        if not self.config_db:
+            return False
+        
+        try:
+            enabled = await self.config_db.hget("CONSOLE_SWITCH|console_mgmt", "enabled")  # type: ignore
+            if enabled == "yes":
+                log.info("Console switch feature is enabled")
+                return True
+            else:
+                log.warning(f"Console switch feature is disabled (enabled={enabled})")
+                return False
+        except Exception as e:
+            log.error(f"Failed to check console switch feature status: {e}")
+            return False
+    
     async def subscribe_config_changes(self) -> None:
         """订阅配置变更事件"""
         if not self.config_db:
@@ -162,6 +179,20 @@ class DbUtil:
                 log.info(f"[{link_id}] State: {oper_state}")
         except Exception as e:
             log.error(f"[{link_id}] Failed to update state: {e}")
+    
+    async def cleanup_state(self, link_id: str) -> None:
+        """清理 STATE_DB 状态"""
+        if not self.state_db:
+            return
+        
+        key = f"CONSOLE_PORT|{link_id}"
+        
+        try:
+            # 只删除 console-monitor 管理的字段，保留 consutil 的字段
+            await self.state_db.hdel(key, "oper_state", "last_heartbeat")  # type: ignore
+            log.info(f"[{link_id}] STATE_DB cleaned up (oper_state, last_heartbeat)")
+        except Exception as e:
+            log.error(f"[{link_id}] Failed to cleanup STATE_DB: {e}")
 
 
 # ============================================================
@@ -280,7 +311,7 @@ class SerialProxy:
         self._timeout_handle: Optional[asyncio.TimerHandle] = None
         self._heartbeat_handle: Optional[asyncio.TimerHandle] = None
 
-    def start(self) -> bool:
+    async def start(self) -> bool:
         try:
             # PTY
             self.pty_master, self.pty_slave = os.openpty()
@@ -314,11 +345,14 @@ class SerialProxy:
 
         except Exception as e:
             log.error(f"[{self.link_id}] Failed: {e}")
-            self.stop()
+            await self.stop()
             return False
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         self.running = False
+
+        # 清理 STATE_DB 状态
+        await self.db.cleanup_state(self.link_id)
 
         # 删除符号链接
         self._remove_symlink()
@@ -477,12 +511,17 @@ class ProxyManager:
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
 
+        # 连接数据库
+        await self.db.connect()
+
+        # 检查 console switch 功能是否启用
+        if not await self.db.check_console_feature_enabled():
+            log.error("Console switch feature is not enabled, exiting...")
+            sys.exit(1)
+
         # 读取 PTY 符号链接前缀
         self.pty_symlink_prefix = get_pty_symlink_prefix()
         log.info(f"PTY symlink prefix: {self.pty_symlink_prefix}")
-
-        # 连接数据库
-        await self.db.connect()
 
         # 初始同步
         await self.sync()
@@ -513,7 +552,7 @@ class ProxyManager:
 
         # 删除不在 Redis 中的 proxy
         for link_id in current_ids - redis_ids:
-            self.proxies[link_id].stop()
+            await self.proxies[link_id].stop()
             del self.proxies[link_id]
 
         # 添加新的 proxy
@@ -524,7 +563,7 @@ class ProxyManager:
                 db=self.db,
                 pty_symlink_prefix=self.pty_symlink_prefix
             )
-            if proxy.start():
+            if await proxy.start():
                 self.proxies[link_id] = proxy
 
         # 更新已存在但配置变化的 proxy
@@ -532,13 +571,13 @@ class ProxyManager:
             cfg = redis_configs[link_id]
             proxy = self.proxies[link_id]
             if proxy.baud != cfg["baud"]:
-                proxy.stop()
+                await proxy.stop()
                 new_proxy = SerialProxy(
                     link_id, cfg["device"], cfg["baud"], self.loop,
                     db=self.db,
                     pty_symlink_prefix=self.pty_symlink_prefix
                 )
-                if new_proxy.start():
+                if await new_proxy.start():
                     self.proxies[link_id] = new_proxy
 
         log.info(f"Sync complete: {len(self.proxies)} proxies active")
@@ -546,8 +585,13 @@ class ProxyManager:
     async def stop(self) -> None:
         self.running = False
 
-        for proxy in self.proxies.values():
-            proxy.stop()
+        # 并发等待所有 proxy 停止
+        if self.proxies:
+            await asyncio.gather(
+                *[proxy.stop() for proxy in self.proxies.values()],
+                return_exceptions=True
+            )
+        
         self.proxies.clear()
 
         await self.db.close()
