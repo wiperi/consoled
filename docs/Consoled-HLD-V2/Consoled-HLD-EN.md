@@ -140,23 +140,80 @@ Create a proxy between each physical serial port and user applications. The prox
 
 1. **Reliable Detection**: Must be distinguishable from arbitrary byte streams; avoid misdetection due to read() call fragmentation
 2. **Low Collision Rate**: Minimize false positives where normal user output is mistakenly identified as heartbeat frames
+3. **Extensibility**: Support version control and future feature extensions
 
-#### 3.1.2 Frame Format
+#### 3.1.2 Special Character Definitions
 
-The heartbeat frame uses a 4-byte sequence of unused Extended ASCII codes (0x80-0x9F range), which are rarely used in normal terminal output, reducing collision probability.
+| Character | Value (Hex) | Name | Description |
+|-----------|-------------|------|-------------|
+| SOF | 0x01 | Start of Frame | Frame start delimiter |
+| EOF | 0x04 | End of Frame | Frame end delimiter |
+| DLE | 0x10 | Data Link Escape | Escape character |
 
-**Heartbeat Byte Sequence:**
+#### 3.1.3 Escape Rules
+
+When frame content (between SOF and EOF) contains special characters, escaping is required:
+
+| Original Byte | Escaped Sequence |
+|---------------|------------------|
+| 0x01 | 0x10 0x01 |
+| 0x04 | 0x10 0x04 |
+| 0x10 | 0x10 0x10 |
+
+#### 3.1.4 Frame Format
 
 ```
-8D 90 8F 9D
++-----+--------+-----+------+------+--------+---------+-------+-----+
+| SOF | Version| Seq | Flag | Type | Length | Payload | CRC16 | EOF |
++-----+--------+-----+------+------+--------+---------+-------+-----+
+| 1B  |   1B   | 1B  |  1B  |  1B  |   1B   |   N B   |  2B   | 1B  |
++-----+--------+-----+------+------+--------+---------+-------+-----+
 ```
 
-| Byte Position | Value (Hex) | Description                          |
-|---------------|-------------|--------------------------------------|
-| 0             | 8D          | Unused Extended ASCII   |
-| 1             | 90          | Unused Extended ASCII   |
-| 2             | 8F          | Unused Extended ASCII   |
-| 3             | 9D          | Unused Extended ASCII   |
+| Field | Size | Description |
+|-------|------|-------------|
+| SOF | 1 byte | Frame start, fixed 0x01 |
+| Version | 1 byte | Protocol version, currently 0x01 |
+| Seq | 1 byte | Sequence number, 0x00-0xFF wrapping |
+| Flag | 1 byte | Flag bits, reserved, currently 0x00 |
+| Type | 1 byte | Frame type |
+| Length | 1 byte | Payload length (0-255) |
+| Payload | N bytes | Optional data payload |
+| CRC16 | 2 bytes | Checksum, big-endian (high byte first) |
+| EOF | 1 byte | Frame end, fixed 0x04 |
+
+**CRC16 Calculation:**
+
+- **Algorithm**: CRC-16/MODBUS (polynomial 0x8005, initial value 0xFFFF, reflect input/output)
+- **Scope**: From Version to Payload (excluding SOF, CRC16, EOF)
+- **Byte Order**: Big-endian (high byte first, low byte second)
+
+#### 3.1.5 Frame Type Definitions
+
+| Type | Value (Hex) | Description |
+|------|-------------|-------------|
+| HEARTBEAT | 0x01 | Heartbeat frame |
+| Reserved | 0x02-0xFF | Future extensions |
+
+#### 3.1.6 Heartbeat Frame Example
+
+Heartbeat frame has no payload, minimum frame length is 9 bytes:
+
+```
+01 01 00 00 01 00 XX XX 04
+│  │  │  │  │  │  └──┴── CRC16 (calculated value)
+│  │  │  │  │  └──────── Length: 0 (no payload)
+│  │  │  │  └─────────── Type: HEARTBEAT (0x01)
+│  │  │  └────────────── Flag: 0x00
+│  │  └───────────────── Seq: 0x00 (sequence number)
+│  └──────────────────── Version: 0x01
+└─────────────────────── SOF
+```
+
+**CRC16 Calculation Example:**
+
+- **Input data (Version to Length)**: `01 00 00 01 00`
+- **CRC16 result**: Calculated using CRC-16/MODBUS algorithm
 
 ---
 
