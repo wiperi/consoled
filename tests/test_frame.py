@@ -360,6 +360,92 @@ class TestFrameFilter:
         # 无效帧应该被丢弃，不应该触发任何回调
         # SOF 会触发一次空的用户数据刷新（buffer 为空时不触发）
         assert len(received_frames) == 0
+    
+    def test_in_frame_property(self, filter_with_callbacks):
+        """测试 in_frame 属性"""
+        frame_filter, received_frames, received_user_data = filter_with_callbacks
+        
+        # 初始状态不在帧内
+        assert not frame_filter.in_frame
+        
+        # 收到 SOF 后进入帧内
+        frame_filter.process(SOF_SEQUENCE)
+        assert frame_filter.in_frame
+        
+        # 收到 EOF 后退出帧内
+        frame_filter.process(EOF_SEQUENCE)
+        assert not frame_filter.in_frame
+    
+    def test_timeout_in_frame_discards_data(self, filter_with_callbacks):
+        """测试在帧内超时时丢弃数据"""
+        frame_filter, received_frames, received_user_data = filter_with_callbacks
+        
+        # 发送 SOF 和部分帧内容（不完整的帧）
+        frame_filter.process(SOF_SEQUENCE + b"\x01\x02\x03")
+        
+        assert frame_filter.in_frame
+        assert frame_filter.has_pending_data()
+        
+        # 超时 - 在帧内，应该丢弃而不是发送给用户
+        frame_filter.on_timeout()
+        
+        # 验证没有用户数据被发送
+        assert len(received_user_data) == 0
+        assert not frame_filter.has_pending_data()
+        assert not frame_filter.in_frame
+    
+    def test_timeout_not_in_frame_sends_user_data(self, filter_with_callbacks):
+        """测试不在帧内超时时发送用户数据"""
+        frame_filter, received_frames, received_user_data = filter_with_callbacks
+        
+        # 发送普通数据（没有 SOF）
+        frame_filter.process(b"\x02\x03\x04")
+        
+        assert not frame_filter.in_frame
+        assert frame_filter.has_pending_data()
+        
+        # 超时 - 不在帧内，应该发送给用户
+        frame_filter.on_timeout()
+        
+        # 验证用户数据被发送
+        assert len(received_user_data) == 1
+        assert received_user_data[0] == b"\x02\x03\x04"
+        assert not frame_filter.has_pending_data()
+    
+    def test_sof_in_frame_discards_previous_data(self, filter_with_callbacks):
+        """测试在帧内收到 SOF 时丢弃之前的数据"""
+        frame_filter, received_frames, received_user_data = filter_with_callbacks
+        
+        # 发送 SOF 和部分帧内容
+        frame_filter.process(SOF_SEQUENCE + b"\x01\x02\x03")
+        assert frame_filter.in_frame
+        
+        # 再次发送 SOF（之前的不完整帧应该被丢弃）
+        frame_filter.process(SOF_SEQUENCE)
+        
+        # 仍然在帧内（新帧开始）
+        assert frame_filter.in_frame
+        # 之前的数据被丢弃，没有发送给用户
+        assert len(received_user_data) == 0
+        # buffer 已清空
+        assert not frame_filter.has_pending_data()
+    
+    def test_sof_not_in_frame_sends_user_data(self, filter_with_callbacks):
+        """测试不在帧内收到 SOF 时发送用户数据"""
+        frame_filter, received_frames, received_user_data = filter_with_callbacks
+        
+        # 发送普通数据
+        frame_filter.process(b"\x02\x03\x04")
+        assert not frame_filter.in_frame
+        
+        # 发送 SOF（应该将之前的数据作为用户数据发送）
+        frame_filter.process(SOF_SEQUENCE)
+        
+        # 现在在帧内
+        assert frame_filter.in_frame
+        # 之前的数据被发送给用户
+        assert len(received_user_data) == 1
+        assert received_user_data[0] == b"\x02\x03\x04"
 
 
 # ============================================================

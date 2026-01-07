@@ -290,45 +290,71 @@ DTE 周期性向串口发送特定格式的心跳帧。
 **检测算法：**
 
 ```python
+# 状态变量
+in_frame = False  # 是否在帧内
+
 def process_bytes(data: bytes) -> bytes:
 
     for b in data:
 
         if b == SOF:
-            send_to_user(buffer)
+            if not in_frame:
+                # 不在帧内，当前 buffer 是用户数据
+                send_to_user(buffer)
+            # else: 在帧内收到 SOF，说明之前的帧不完整，丢弃
             buffer.clear()
             pos = 0
+            in_frame = True  # 进入帧内状态
         
         elif b == EOF:
             parse_frame(buffer)
             buffer.clear()
             pos = 0
+            in_frame = False  # 退出帧内状态
 
         else:
             buffer.append(b)
             pos += 1
 
         if pos >= MAX_FRAME_SIZE:
-            send_to_user(buffer)
+            if not in_frame:
+                send_to_user(buffer)
+            # else: 在帧内溢出，帧无效，丢弃
             buffer.clear()
             pos = 0
+            in_frame = False
 
 # 0.5s 内没有读取到任何数据
 def on_read_timeout():
     if buffer:
-        send_to_user(buffer)
+        if not in_frame:
+            # 不在帧内，buffer 是用户数据
+            send_to_user(buffer)
+        # else: 在帧内超时，帧不完整，丢弃
         buffer.clear()
         pos = 0
+        in_frame = False
 
 ```
 
 **帧处理流程：**
 
 算法说明：
-*   收到SOF（帧起始符）时：将当前缓冲区内容作为普通数据发送给用户，然后清空缓冲区准备接收新帧
-*   收到EOF（帧结束符）时：解析缓冲区中的完整帧数据（验证CRC、提取负载等），然后清空缓冲区
-*   收到其他字节时：将字节添加到缓冲区，继续积累帧数据
-*   缓冲区溢出保护：当缓冲区长度达到上限时，将内容作为普通数据发送给用户并清空，防止无效数据占用内存
+*   **状态跟踪**: 使用 `in_frame` 变量跟踪当前是否在帧内（SOF 和 EOF 之间）
+*   收到SOF（帧起始符）时：
+    *   如果不在帧内：将当前缓冲区内容作为普通数据发送给用户
+    *   如果在帧内：说明之前的帧不完整，丢弃缓冲区内容
+    *   进入帧内状态
+*   收到EOF（帧结束符）时：解析缓冲区中的帧数据，退出帧内状态
+*   收到其他字节时：将字节添加到缓冲区
+*   缓冲区溢出保护：
+    *   如果不在帧内：将内容作为普通数据发送给用户
+    *   如果在帧内：帧无效，丢弃缓冲区内容
+    *   退出帧内状态
+*   **超时处理**: 当 0.5s 内没有新数据时：
+    *   如果不在帧内：将缓冲区作为用户数据发送
+    *   如果在帧内：帧不完整，丢弃缓冲区内容
+    *   退出帧内状态
 
 ---
 

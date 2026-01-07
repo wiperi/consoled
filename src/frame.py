@@ -268,13 +268,26 @@ class FrameFilter:
     2. 从字节流中识别帧和用户数据
     3. 通过回调函数将帧和用户数据交给外部处理
     
+    状态跟踪:
+    - _in_frame: 是否在帧内（SOF 和 EOF 之间）
+    - _escape_next: 下一个字节是否被 DLE 转义
+    
     检测算法 (基于 HLD 3.3.3):
-    - 收到 SOF 时: 将当前 buffer 作为用户数据发送，清空 buffer
-    - 收到 EOF 时: 尝试解析 buffer 为帧
+    - 收到 SOF 时:
+        - 不在帧内: 将当前 buffer 作为用户数据发送
+        - 在帧内: 之前的帧不完整，丢弃 buffer
+        - 进入帧内状态
+    - 收到 EOF 时: 尝试解析 buffer 为帧，退出帧内状态
     - 收到 DLE 时: 下一个字节作为普通数据处理（转义）
     - 收到其他字节时: 追加到 buffer
-    - buffer 溢出时: 将 buffer 作为用户数据发送
-    - 超时时: 将 buffer 作为用户数据发送
+    - buffer 溢出时:
+        - 不在帧内: 将 buffer 作为用户数据发送
+        - 在帧内: 帧无效，丢弃 buffer
+        - 退出帧内状态
+    - 超时时:
+        - 不在帧内: 将 buffer 作为用户数据发送
+        - 在帧内: 帧不完整，丢弃 buffer
+        - 退出帧内状态
     """
     
     def __init__(
@@ -291,6 +304,7 @@ class FrameFilter:
         self._on_user_data = on_user_data
         self._buffer = bytearray()
         self._escape_next = False  # DLE 转义标志
+        self._in_frame = False  # 是否在帧内（SOF 和 EOF 之间）
     
     def process(self, data: bytes) -> None:
         """
@@ -306,32 +320,47 @@ class FrameFilter:
                 self._escape_next = False
                 # 溢出保护
                 if len(self._buffer) >= MAX_FRAME_BUFFER_SIZE:
-                    self._flush_as_user_data()
+                    self._flush_buffer()
             elif byte == SpecialChar.DLE:
                 # 收到 DLE: 标记下一个字节需要转义
                 self._buffer.append(byte)
                 self._escape_next = True
             elif byte == SpecialChar.SOF:
-                # 收到 SOF: 当前 buffer 是用户数据
-                self._flush_as_user_data()
+                # 收到 SOF: 根据是否在帧内决定处理方式
+                if not self._in_frame:
+                    # 不在帧内，buffer 是用户数据
+                    self._flush_as_user_data()
+                else:
+                    # 在帧内，之前的帧不完整，丢弃
+                    self._discard_buffer()
+                self._in_frame = True  # 进入帧内状态
             elif byte == SpecialChar.EOF:
                 # 收到 EOF: 尝试解析 buffer 为帧
                 self._try_parse_frame()
+                self._in_frame = False  # 退出帧内状态
             else:
                 # 其他字节: 追加到 buffer
                 self._buffer.append(byte)
                 
                 # 溢出保护
                 if len(self._buffer) >= MAX_FRAME_BUFFER_SIZE:
-                    self._flush_as_user_data()
+                    self._flush_buffer()
     
     def on_timeout(self) -> None:
         """
         超时回调
         
-        当一段时间内没有收到数据时调用，将 buffer 作为用户数据发送
+        当一段时间内没有收到数据时调用:
+        - 不在帧内: 将 buffer 作为用户数据发送
+        - 在帧内: 帧不完整，丢弃 buffer
         """
-        self._flush_as_user_data()
+        if not self._in_frame:
+            # 不在帧内，buffer 是用户数据
+            self._flush_as_user_data()
+        else:
+            # 在帧内，帧不完整，丢弃
+            self._discard_buffer()
+        self._in_frame = False  # 退出帧内状态
     
     def flush(self) -> bytes:
         """
@@ -343,11 +372,17 @@ class FrameFilter:
         result = bytes(self._buffer)
         self._buffer.clear()
         self._escape_next = False
+        self._in_frame = False
         return result
     
     def has_pending_data(self) -> bool:
         """检查是否有待处理的数据"""
         return len(self._buffer) > 0
+    
+    @property
+    def in_frame(self) -> bool:
+        """检查当前是否在帧内"""
+        return self._in_frame
     
     def _flush_as_user_data(self) -> None:
         """将 buffer 作为用户数据发送"""
@@ -355,6 +390,21 @@ class FrameFilter:
             self._on_user_data(bytes(self._buffer))
         self._buffer.clear()
         self._escape_next = False
+    
+    def _discard_buffer(self) -> None:
+        """丢弃 buffer（不发送给用户）"""
+        self._buffer.clear()
+        self._escape_next = False
+    
+    def _flush_buffer(self) -> None:
+        """根据是否在帧内决定如何处理 buffer 溢出"""
+        if not self._in_frame:
+            # 不在帧内，buffer 是用户数据
+            self._flush_as_user_data()
+        else:
+            # 在帧内，帧无效，丢弃
+            self._discard_buffer()
+        self._in_frame = False  # 退出帧内状态
     
     def _try_parse_frame(self) -> None:
         """尝试将 buffer 解析为帧"""
