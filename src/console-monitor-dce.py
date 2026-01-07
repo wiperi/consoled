@@ -3,7 +3,7 @@
 Console Proxy Service
 
 监听 Redis 配置，为每个串口创建过滤代理。
-- 帧格式: SOF + Version + Seq + Flag + Type + Length + Payload + CRC16 + EOF
+- 过滤字符串: "hello"
 - 超时: 1s (buffer 非空时透传)
 """
 
@@ -17,11 +17,12 @@ import tty
 import fcntl
 import time
 import logging
-from enum import Enum, auto
-from typing import Optional, Any, Callable
+from typing import Optional, Any
 
 import redis.asyncio as aioredis
 from sonic_py_common import device_info
+
+from src.frame import Frame, FrameFilter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,21 +37,8 @@ REDIS_PORT = 6379
 REDIS_DB = 4          # 配置数据库
 STATE_DB = 6          # 状态数据库
 KEY_PATTERN = "CONSOLE_PORT|*"
-FILTER_TIMEOUT = 1.0       # 过滤超时（秒）
+FILTER_TIMEOUT = 0.5       # 帧过滤超时（秒）
 HEARTBEAT_TIMEOUT = 15.0   # 心跳超时（秒）
-
-# 帧协议常量
-SOF = 0x01            # Start of Frame
-EOF = 0x04            # End of Frame
-DLE = 0x10            # Data Link Escape
-
-# 帧类型
-FRAME_TYPE_HEARTBEAT = 0x01
-
-# 帧长度限制
-MAX_PAYLOAD_LEN = 24
-MAX_FRAME_LEN = 31    # 不含 SOF/EOF: Version(1) + Seq(1) + Flag(1) + Type(1) + Length(1) + Payload(24) + CRC16(2)
-MIN_FRAME_LEN = 7     # 无 Payload: Version(1) + Seq(1) + Flag(1) + Type(1) + Length(1) + CRC16(2)
 
 BAUD_MAP = {
     1200: termios.B1200, 2400: termios.B2400, 4800: termios.B4800,
@@ -242,163 +230,7 @@ def configure_pty(fd: int) -> None:
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
 
-# ============================================================
-# 帧过滤器（状态机）
-# ============================================================
 
-class FrameState(Enum):
-    """帧接收状态"""
-    IDLE = auto()       # 等待 SOF
-    RECEIVING = auto()  # 接收帧数据
-    ESCAPED = auto()    # 收到 DLE，等待下一字节
-    COMPLETE = auto()   # 收到 EOF，帧接收完成
-
-
-def crc16_modbus(data: bytes) -> int:
-    """计算 CRC-16/MODBUS
-    
-    多项式: 0x8005, 初始值: 0xFFFF, 反射输入/输出
-    """
-    crc = 0xFFFF
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            if crc & 0x0001:
-                crc = (crc >> 1) ^ 0xA001  # 0x8005 反射后
-            else:
-                crc >>= 1
-    return crc
-
-
-class FrameFilter:
-    """帧过滤器 - 使用状态机检测和过滤心跳帧
-    
-    帧格式: SOF + Version + Seq + Flag + Type + Length + Payload + CRC16 + EOF
-    - SOF/DLE/EOF 不入 buffer
-    - 转义处理在入 buffer 前完成
-    - buffer 只存储逻辑帧内容
-    """
-    
-    def __init__(self, on_heartbeat: Callable[[], None]):
-        self.state = FrameState.IDLE
-        self.buffer = bytearray()
-        self.on_heartbeat = on_heartbeat
-        self._passthrough = bytearray()  # 需要透传的数据
-    
-    def process(self, data: bytes) -> bytes:
-        """处理输入数据，返回需要透传到 PTY 的数据"""
-        self._passthrough.clear()
-        
-        for byte in data:
-            self._process_byte(byte)
-        
-        return bytes(self._passthrough)
-    
-    def _process_byte(self, byte: int) -> None:
-        """处理单个字节"""
-        if self.state == FrameState.IDLE:
-            if byte == SOF:
-                # 收到 SOF，开始接收帧（SOF 不入 buffer）
-                self.state = FrameState.RECEIVING
-                self.buffer.clear()
-            else:
-                # 非 SOF 字节，透传
-                self._passthrough.append(byte)
-        
-        elif self.state == FrameState.RECEIVING:
-            if byte == DLE:
-                # 收到 DLE，进入转义状态（DLE 不入 buffer）
-                self.state = FrameState.ESCAPED
-            elif byte == EOF:
-                # 收到 EOF，帧接收完成
-                self.state = FrameState.COMPLETE
-                self._validate_and_process_frame()
-            elif byte == SOF:
-                # 收到意外的 SOF，当前帧无效，透传 buffer，重新开始
-                self._passthrough.append(SOF)  # 之前的 SOF
-                self._passthrough.extend(self.buffer)
-                self.buffer.clear()
-                # 保持 RECEIVING 状态，新的 SOF 开始新帧
-            else:
-                # 普通字节，入 buffer
-                self.buffer.append(byte)
-                self._check_overflow()
-        
-        elif self.state == FrameState.ESCAPED:
-            # 去转义后入 buffer
-            self.buffer.append(byte)
-            self.state = FrameState.RECEIVING
-            self._check_overflow()
-    
-    def _check_overflow(self) -> None:
-        """检查 buffer 是否溢出"""
-        if len(self.buffer) > MAX_FRAME_LEN:
-            log.warning(f"Frame buffer overflow, passthrough {len(self.buffer)} bytes")
-            self._passthrough.append(SOF)
-            self._passthrough.extend(self.buffer)
-            self.buffer.clear()
-            self.state = FrameState.IDLE
-    
-    def _validate_and_process_frame(self) -> None:
-        """验证并处理完整帧"""
-        self.state = FrameState.IDLE
-        
-        # 检查最小长度
-        if len(self.buffer) < MIN_FRAME_LEN:
-            log.debug(f"Frame too short: {len(self.buffer)} bytes")
-            return
-        
-        # 解析帧头
-        version = self.buffer[0]
-        seq = self.buffer[1]
-        flag = self.buffer[2]
-        frame_type = self.buffer[3]
-        length = self.buffer[4]
-        
-        # 检查 Length 与实际 Payload 长度
-        expected_len = 5 + length + 2  # header(5) + payload + crc16(2)
-        if len(self.buffer) != expected_len:
-            log.debug(f"Frame length mismatch: expected {expected_len}, got {len(self.buffer)}")
-            return
-        
-        # 检查 Payload 长度限制
-        if length > MAX_PAYLOAD_LEN:
-            log.debug(f"Payload too long: {length}")
-            return
-        
-        # 提取 Payload 和 CRC
-        payload = bytes(self.buffer[5:5+length])
-        crc_received = (self.buffer[-2] << 8) | self.buffer[-1]  # 大端序
-        
-        # 计算 CRC（Version 到 Payload）
-        crc_data = bytes(self.buffer[:-2])
-        crc_calculated = crc16_modbus(crc_data)
-        
-        if crc_received != crc_calculated:
-            log.debug(f"CRC mismatch: received 0x{crc_received:04X}, calculated 0x{crc_calculated:04X}")
-            return
-        
-        # 帧有效，根据类型处理
-        log.debug(f"Valid frame: type=0x{frame_type:02X}, seq={seq}, len={length}")
-        
-        if frame_type == FRAME_TYPE_HEARTBEAT:
-            self.on_heartbeat()
-    
-    def flush(self) -> bytes:
-        """刷新 buffer，返回需要透传的数据"""
-        if self.state != FrameState.IDLE and self.buffer:
-            result = bytearray()
-            result.append(SOF)
-            result.extend(self.buffer)
-            self.buffer.clear()
-            self.state = FrameState.IDLE
-            return bytes(result)
-        return b""
-    
-    @property
-    def has_pending_data(self) -> bool:
-        """是否有待处理的数据"""
-        return self.state != FrameState.IDLE or len(self.buffer) > 0
 
 
 # ============================================================
@@ -442,8 +274,11 @@ class SerialProxy:
             set_nonblocking(self.pty_master)
             set_nonblocking(self.ser_fd)
 
-            # 创建帧过滤器，传入心跳回调
-            self.filter = FrameFilter(on_heartbeat=self._on_heartbeat_received)
+            # 创建帧过滤器，设置回调
+            self.filter = FrameFilter(
+                on_frame=self._on_frame_received,
+                on_user_data=self._on_user_data_received,
+            )
 
             # 注册到事件循环
             self.loop.add_reader(self.ser_fd, self._on_serial_read)
@@ -510,6 +345,7 @@ class SerialProxy:
         log.info(f"[{self.link_id}] Stopped")
 
     def _on_serial_read(self) -> None:
+        """串口数据读取回调"""
         if not self.running or not self.filter:
             return
         try:
@@ -520,14 +356,11 @@ class SerialProxy:
                     self._timeout_handle.cancel()
                     self._timeout_handle = None
 
-                # 处理数据，过滤心跳帧
-                passthrough = self.filter.process(data)
+                # 处理数据，FrameFilter 会通过回调分发帧和用户数据
+                self.filter.process(data)
 
-                if passthrough:
-                    os.write(self.pty_master, passthrough)
-
-                # 如果有待处理的数据（正在接收帧），设置超时定时器
-                if self.filter.has_pending_data:
+                # 如果 buffer 非空，设置新的超时定时器
+                if self.filter.has_pending_data():
                     self._timeout_handle = self.loop.call_later(
                         FILTER_TIMEOUT,
                         self._on_timeout
@@ -535,11 +368,24 @@ class SerialProxy:
         except (BlockingIOError, OSError):
             pass
 
-    def _on_heartbeat_received(self) -> None:
-        """收到有效心跳帧，重置心跳定时器，更新状态为 up"""
-        log.debug(f"[{self.link_id}] Heartbeat received")
-        self._reset_heartbeat_timer()
-        self._update_state("up")
+    def _on_frame_received(self, frame: Frame) -> None:
+        """帧接收回调：收到有效帧时触发"""
+        if frame.is_heartbeat():
+            # 心跳帧：重置定时器，更新状态为 up
+            self._reset_heartbeat_timer()
+            self._update_state("up")
+            log.debug(f"[{self.link_id}] Heartbeat frame received (seq={frame.seq})")
+        else:
+            # 其他类型帧：目前只支持心跳，记录日志
+            log.warning(f"[{self.link_id}] Unknown frame type: {frame.frame_type}")
+
+    def _on_user_data_received(self, data: bytes) -> None:
+        """用户数据回调：收到非帧数据时转发到 PTY"""
+        if self.pty_master >= 0:
+            try:
+                os.write(self.pty_master, data)
+            except OSError:
+                pass
 
     def _reset_heartbeat_timer(self) -> None:
         """重置心跳超时定时器"""
@@ -563,18 +409,13 @@ class SerialProxy:
         asyncio.create_task(self.db.update_state(self.link_id, oper_state))
 
     def _on_timeout(self) -> None:
-        """超时回调：透传 buffer 中的数据"""
+        """超时回调：将 buffer 作为用户数据处理"""
         self._timeout_handle = None
         if not self.running or not self.filter:
             return
-        if self.filter.buffer and self.pty_master >= 0:
-            data = self.filter.flush()
-            if data:
-                try:
-                    os.write(self.pty_master, data)
-                    log.debug(f"[{self.link_id}] Timeout flush: {data!r}")
-                except OSError:
-                    pass
+        # 通知 FrameFilter 超时，它会通过 on_user_data 回调发送数据
+        self.filter.on_timeout()
+        log.debug(f"[{self.link_id}] Filter timeout triggered")
 
     def _on_pty_read(self) -> None:
         if not self.running:

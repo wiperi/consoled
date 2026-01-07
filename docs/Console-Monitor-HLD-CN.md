@@ -17,7 +17,7 @@
   - [2.2 DTE 侧](#22-dte-侧)
   - [2.3 DCE 侧](#23-dce-侧)
 - [3. 详细设计](#3-详细设计)
-  - [3.1 心跳帧设计](#31-心跳帧设计)
+  - [3.1 帧结构设计](#31-帧结构设计)
   - [3.2 DTE 侧服务](#32-dte-侧服务)
   - [3.3 DCE 侧 Console Monitor 服务](#33-dce-侧-console-monitor-服务)
 - [4. 数据库更改](#4-数据库更改)
@@ -47,15 +47,13 @@
 
 ### 1.1 功能需求
 
-    连通性检测（Heartbeat）
-        判断 DCE ↔ DTE 串口链路是否可用（Oper Up/Down）
-
-    非侵入式（Non-Interference）
-        不影响正常 Console 运维，包括远程设备冷重启和系统重装
-
-    高可用与持久化（HA & Persistence）
-        进程/系统重启后可恢复状态
-        对端重启后可自动恢复探测
+*   **连通性检测（Heartbeat）**
+    *   判断 DCE ↔ DTE 串口链路是否可用（Oper Up/Down）
+*   **非侵入式（Non-Interference）**
+    *   不影响正常 Console 运维，包括远程设备冷重启和系统重装
+*   **高可用与持久化（HA & Persistence）**
+    *   进程/系统重启后可恢复状态
+    *   对端重启后可自动恢复探测
 
 ### 1.2 设计目标
 
@@ -109,32 +107,27 @@ flowchart LR
 
 DTE 周期性向串口发送特定格式的心跳帧。
 
-    单向数据流
-        DTE → DCE 方向，保证 DTE 重启阶段不会收到 DCE 侧协议干扰数据
-
-    碰撞风险
-        正常数据流中可能包含心跳帧格式的数据，导致误判
-        通过心跳帧设计降低碰撞概率
+*   **单向数据流**
+    *   DTE → DCE 方向，保证 DTE 重启阶段不会收到 DCE 侧协议干扰数据
+*   **碰撞风险**
+    *   正常数据流中可能包含心跳帧格式的数据，导致误判
+    *   通过心跳帧设计降低碰撞概率
 
 ### 2.3 DCE 侧
 
 在物理串口和用户应用之间创建 Proxy，负责心跳帧检测、过滤和链路状态维护。
 
-    独占权
-        唯一持有物理串口文件描述符（`/dev/ttyUSBx`）的进程
-
-    PTY 创建
-        为上层应用创建伪终端对
-
-    PTY 符号链接
-        创建固定符号链接（如 `/dev/VC0-1`）指向动态 PTY slave（如 `/dev/pts/3`）
-        上层应用（consutil、picocom）使用稳定的设备路径
-
-    心跳过滤
-        识别心跳帧，更新状态，并丢弃心跳数据
-
-    数据透传
-        非心跳数据透明转发到虚拟串口
+*   **独占权**
+    *   唯一持有物理串口文件描述符（`/dev/ttyUSBx`）的进程
+*   **PTY 创建**
+    *   为上层应用创建伪终端对
+*   **PTY 符号链接**
+    *   创建固定符号链接（如 `/dev/VC0-1`）指向动态 PTY slave（如 `/dev/pts/3`）
+    *   上层应用（consutil、picocom）使用稳定的设备路径
+*   **心跳过滤**
+    *   识别心跳帧，更新状态，并丢弃心跳数据
+*   **数据透传**
+    *   非心跳数据透明转发到虚拟串口
 
 ---
 
@@ -144,22 +137,19 @@ DTE 周期性向串口发送特定格式的心跳帧。
 
 #### 3.1.1 设计原则
 
-    可靠检测
-        可从任意字节流中区分心跳帧
-        支持从帧中间开始读取时恢复对齐
-
-    容错性
-        使用 3 字节同步序列作为帧定界符
-        单个字节的 bit error 不会导致帧同步丢失
-
-    透明传输
-        转义机制确保帧内容可包含任意字节
+*   **可靠检测**
+    *   可从任意字节流中区分心跳帧
+    *   支持从帧中间开始读取时恢复对齐
+*   **容错性**
+    *   使用 3 字节同步序列作为帧定界符
+    *   单个字节的 bit error 不会导致帧同步丢失
+*   **透明传输**
+    *   转义机制确保帧内容可包含任意字节
 
 #### 3.1.2 关键假设
 
-    用户数据流中不会出现特殊字符，0x01 (SOF), 0x1B (EOF), 0x10 (DLE) 
-
-    bit error 连续在 3 个字节中出现的概率可忽略不计
+*   用户数据流中不会出现特殊字符，0x01 (SOF), 0x1B (EOF), 0x10 (DLE)
+*   bit error 连续在 3 个字节中出现的概率可忽略不计
 
 #### 3.1.3 特殊字符定义
 
@@ -171,27 +161,26 @@ DTE 周期性向串口发送特定格式的心跳帧。
 
 **定界符选择说明：**
 
-    SOF (0x01)
-        ASCII SOH (Start of Heading)
-        不可打印字符，正常终端输出中极少出现
-
-    EOF (0x1B)
-        ASCII ESC
-        虽然在终端控制序列中常见，但通过转义机制处理
-
-    DLE (0x10)
-        ASCII DLE (Data Link Escape)
-        用于转义帧内容中的特殊字符
+*   **SOF (0x01)**
+    *   ASCII SOH (Start of Heading)
+    *   不可打印字符，正常终端输出中极少出现
+*   **EOF (0x1B)**
+    *   ASCII ESC
+    *   虽然在终端控制序列中常见，但通过转义机制处理
+*   **DLE (0x10)**
+    *   ASCII DLE (Data Link Escape)
+    *   用于转义帧内容中的特殊字符
 
 **同步序列设计：**
 
-    帧头同步序列
-        3 个连续的 SOF 字符：0x01 0x01 0x01
-        单个 SOF 发生 bit error 不会导致帧同步丢失
-
-    帧尾同步序列
-        3 个连续的 EOF 字符：0x1B 0x1B 0x1B
-        同样提供 bit error 容错能力
+*   **帧头同步序列**
+    *   3 个连续的 SOF 字符：0x01 0x01 0x01
+    *   收到任何一个SOF都会起到状态转换的作用，而不是收到连续的三个SOF才会触发状态转换
+    *   单个 SOF 发生 bit error 不会导致帧同步丢失
+*   **帧尾同步序列**
+    *   3 个连续的 EOF 字符：0x1B 0x1B 0x1B
+    *   同样，收到任何一个EOF字符都会触发状态转换
+    *   同样提供 bit error 容错能力
 
 #### 3.1.4 转义规则
 
@@ -205,15 +194,14 @@ DTE 周期性向串口发送特定格式的心跳帧。
 
 **转义处理说明：**
 
-    发送端
-        先对帧内容进行转义
-        然后计算 CRC16（包含转义字符）
-        最后添加帧头和帧尾
-
-    接收端
-        buffer 存储转义后的原始数据（包含 DLE）
-        CRC16 校验使用 buffer 中的数据
-        校验通过后再去转义提取原始数据
+*   **发送端**
+    *   先对帧内容进行转义
+    *   然后计算 CRC16（包含转义字符）
+    *   最后添加帧头和帧尾
+*   **接收端**
+    *   去除帧头和帧尾后，剩下的原始数据（包括转义字符）存入帧buffer中
+    *   CRC16 校验使用 buffer 中的数据
+    *   校验通过后再去转义提取数据
 
 #### 3.1.5 帧格式
 
@@ -239,30 +227,22 @@ DTE 周期性向串口发送特定格式的心跳帧。
 
 **帧长度限制：**
 
-    最大帧长度
-        不超过 Buffer 大小（MAX_BUFFER）
-        确保从帧中间开始读取时能恢复对齐
-
-    Buffer 大小
-        建议 64 字节，可根据需求调整
-        存储去转义后的帧内容
-
-    设计说明
-        转义处理在字节入 buffer 前完成
-        buffer 只存储逻辑帧内容，不含帧头/帧尾/DLE
-        Buffer 溢出时透传并重置，等待下一个帧头
+*   **最大帧长度**
+    *   去掉帧头帧尾后，不超过 64 字节
+    *   Length的值 <= 24
+    *   帧长度 <= buffer 长度确保从帧中间开始读取时能恢复对齐
+*   **Buffer 大小**
+    *   64 字节，可根据需求调整
 
 **CRC16 计算：**
 
-    算法
-        CRC-16/MODBUS（多项式 0x8005，初始值 0xFFFF，反射输入/输出）
-
-    计算范围
-        从 Version 到 Payload（转义后的数据，包含 DLE 字符）
-        不包括帧头、CRC16 本身、帧尾
-
-    字节序
-        大端序（高字节在前，低字节在后）
+*   **算法**
+    *   CRC-16/MODBUS（多项式 0x8005，初始值 0xFFFF，反射输入/输出）
+*   **计算范围**
+    *   从 Version 到 Payload（包含 DLE 字符）
+    *   不包括帧头、CRC16 本身、帧尾
+*   **字节序**
+    *   大端序（高字节在前，低字节在后）
 
 #### 3.1.6 帧类型定义
 
@@ -271,10 +251,11 @@ DTE 周期性向串口发送特定格式的心跳帧。
 | HEARTBEAT | 0x01 | 心跳帧 |
 | 保留 | 0x02-0xFF | 未来扩展 |
 
+#### FLAG字段定义
+
+标志位保留，当前默认为0x00
+
 #### 3.1.7 心跳帧示例
-
-心跳帧无 Payload，帧长度为 14 字节：
-
 ```
 01 01 01 01 00 00 01 00 XX XX 1B 1B 1B
 └──┬──┘ │  │  │  │  │  └──┬─┘ └──┬──┘
@@ -288,102 +269,64 @@ DTE 周期性向串口发送特定格式的心跳帧。
    └───────────────────────── SOF x 3 (帧头同步序列)
 ```
 
-**CRC16 计算示例：**
-
-    输入数据（Version 到 Length）
-        01 00 00 01 00
-
-    CRC16 结果
-        使用 CRC-16/MODBUS 算法计算
-
 ---
 
 #### 3.3.3 帧检测与过滤
 
-使用状态机进行帧检测：
-
 **Buffer 设计：**
 
-    帧 Buffer
-        固定大小（MAX_BUFFER，建议 64 字节）
-        存储转义后的帧内容（包含 DLE 字符）
+*   **Buffer**
+    *   固定大小 64 字节
+    *   存储除了SOF，EOF以外的所有数据
+*   **设计原则**
+    *   帧头、帧尾不入 buffer
+    *   帧内容（包括 DLE 和被转义字符）全部入 buffer
+    *   CRC16 校验使用 buffer 中的数据
+    *   校验通过后再去转义提取原始数据
 
-    设计原则
-        帧头、帧尾不入 buffer
-        帧内容（包括 DLE 和被转义字符）全部入 buffer
-        CRC16 校验使用 buffer 中的数据
-        校验通过后再去转义提取原始数据
-
-**状态机定义：**
-
-| 状态 | 描述 |
-|------|------|
-| IDLE | 等待帧头同步序列，其他字节透传到 PTY |
-| RECEIVING | 接收帧数据，所有字节入 buffer |
-| COMPLETE | 收到帧尾同步序列，帧接收完成 |
-
-**状态转换：**
-
-```mermaid
-stateDiagram-v2
-    [*] --> IDLE
-    
-    IDLE --> IDLE: 非帧头字节\n透传到 PTY
-    IDLE --> RECEIVING: 收到帧头 (0x01 x 3)\n透传已有 buffer，清空
-    
-    RECEIVING --> COMPLETE: 收到帧尾 (0x1B x 3)\n不入 buffer
-    RECEIVING --> RECEIVING: 所有字节（包括 DLE）\n入 buffer
-    RECEIVING --> IDLE: buffer 溢出或超时\n透传 buffer 内容
-    
-    COMPLETE --> IDLE: CRC 校验成功\n去转义后处理帧
-    COMPLETE --> IDLE: CRC 校验失败\n丢弃帧，记录错误
-```
 
 **检测算法：**
 
-    1. 等待帧头
-        在 IDLE 状态，检测连续 3 个 SOF (0x01)
-        非帧头字节直接透传到 PTY
-        收到帧头进入 RECEIVING 状态
+```python
+def process_bytes(data: bytes) -> bytes:
 
-    2. 接收帧数据
-        收到帧尾 (0x1B x 3)：帧接收完成，进入 COMPLETE 状态
-        其他所有字节（包括 DLE）：直接入 buffer
+    for b in data:
 
-    3. 验证帧
-        使用 buffer 中的数据（含转义字符）计算 CRC16
-        校验成功：去转义提取原始数据，根据 Type 处理
-        校验失败：丢弃帧，记录错误日志
+        if b == SOF:
+            send_to_user(buffer)
+            buffer.clear()
+            pos = 0
+        
+        elif b == EOF:
+            parse_frame(buffer)
+            buffer.clear()
+            pos = 0
 
-    4. 去转义处理
-        CRC 校验通过后，遍历 buffer 进行去转义
-        DLE + 0x01 → 0x01（原始数据）
-        DLE + 0x1B → 0x1B（原始数据）
-        DLE + 0x10 → 0x10（原始数据）
+        else:
+            buffer.append(b)
+            pos += 1
 
-    5. 超时处理
-        RECEIVING 状态超过 1 秒未收到帧尾
-        将 buffer 内容透传到 PTY（加上帧头前缀）
-        返回 IDLE 状态
+        if pos >= MAX_FRAME_SIZE:
+            send_to_user(buffer)
+            buffer.clear()
+            pos = 0
 
-    6. 溢出处理
-        buffer 超过 MAX_BUFFER 仍未收到帧尾
-        透传 buffer 内容，返回 IDLE 状态
+# 0.5s 内没有读取到任何数据
+def on_read_timeout():
+    if buffer:
+        send_to_user(buffer)
+        buffer.clear()
+        pos = 0
+
+```
 
 **帧处理流程：**
 
-```mermaid
-flowchart TD
-    A["收到完整帧"] --> B{"CRC16 校验"}
-    B -->|失败| C["丢弃帧, 记录错误"]
-    B -->|成功| D{"检查 Type"}
-    D -->|HEARTBEAT| E["重置心跳定时器"]
-    E --> F["更新 STATE_DB"]
-    D -->|其他| G["按类型处理或忽略"]
-    C --> H["返回 IDLE"]
-    F --> H
-    G --> H
-```
+算法说明：
+*   收到SOF（帧起始符）时：将当前缓冲区内容作为普通数据发送给用户，然后清空缓冲区准备接收新帧
+*   收到EOF（帧结束符）时：解析缓冲区中的完整帧数据（验证CRC、提取负载等），然后清空缓冲区
+*   收到其他字节时：将字节添加到缓冲区，继续积累帧数据
+*   缓冲区溢出保护：当缓冲区长度达到上限时，将内容作为普通数据发送给用户并清空，防止无效数据占用内存
 
 ---
 
@@ -393,14 +336,12 @@ flowchart TD
 
 DTE 侧服务以固定 5 秒间隔周期性发送心跳帧。
 
-    发送周期
-        固定 5 秒
-
-    服务实例
-        使用 systemd 模板单元按串口生成
-
-    自动激活
-        由 systemd generator 根据内核命令行参数创建
+*   **发送周期**
+    *   固定 5 秒
+*   **服务实例**
+    *   使用 systemd 模板单元按串口生成
+*   **自动激活**
+    *   由 systemd generator 根据内核命令行参数创建
 
 #### 3.2.2 服务启动与管理
 
@@ -443,72 +384,62 @@ flowchart TD
 
 超时周期默认 15 秒。如果在此期间未收到心跳，链路状态判定为 Down。
 
-
 #### 3.3.4 Oper 状态判定
 
 每条链路维护独立状态。收到心跳时，Proxy 更新心跳计时器并将 oper 状态设为 UP。每 15 秒执行定时检查，如果最近 15 秒内未收到心跳，oper 状态设为 DOWN。状态变更写入 STATE_DB。
 
 STATE_DB 条目：
 
-    Key: `CONSOLE_PORT|<link_id>`
-    Field: `oper_state`, Value: `up` / `down`
-    Field: `last_heartbeat`, Value: `<timestamp>`
+*   Key: `CONSOLE_PORT|<link_id>`
+*   Field: `oper_state`, Value: `up` / `down`
+*   Field: `last_heartbeat`, Value: `<timestamp>`
 
 #### 3.3.5 服务启动与初始化
 
 console-monitor 服务按以下顺序启动：
 
-    1. 等待依赖
-        在 `config-setup.service` 完成将 config.json 加载到 CONFIG_DB 后启动
-
-    2. 连接 Redis
-        建立到 CONFIG_DB 和 STATE_DB 的连接
-
-    3. 检查 Console 功能
-        验证 CONFIG_DB 中 `CONSOLE_SWITCH|console_mgmt` 的 `enabled` 字段是否为 `"yes"`
-        如禁用则立即退出
-
-    4. 读取 PTY 符号链接前缀
-        从 `<platform_path>/udevprefix.conf` 读取设备前缀（如 `C0-`）
-        构造虚拟设备前缀 `/dev/V<prefix>`（如 `/dev/VC0-`）
-
-    5. 初始化 Proxy 实例
-        为 CONFIG_DB 中的每个串口配置：
-        - 打开物理串口（如 `/dev/C0-1`）
-        - 创建 PTY 对（master/slave，如 `/dev/pts/X`）
-        - 创建符号链接（如 `/dev/VC0-1` → `/dev/pts/3`）
-        - 配置串口和 PTY 为 raw 模式
-        - 将文件描述符注册到 asyncio 事件循环
-        - 启动心跳超时定时器（15 秒）
-
-    6. 订阅配置变更
-        监听 CONFIG_DB keyspace 事件以动态重配置
-
-    7. 进入主循环
-        处理串口数据，过滤心跳，更新 STATE_DB
-
-    8. 初始状态
-        15 秒内无心跳，`oper_state` 设为 `down`
-        收到首个心跳后，`oper_state` 变为 `up`，记录 `last_heartbeat` 时间戳
+1.  **等待依赖**
+    *   在 `config-setup.service` 完成将 config.json 加载到 CONFIG_DB 后启动
+2.  **连接 Redis**
+    *   建立到 CONFIG_DB 和 STATE_DB 的连接
+3.  **检查 Console 功能**
+    *   验证 CONFIG_DB 中 `CONSOLE_SWITCH|console_mgmt` 的 `enabled` 字段是否为 `"yes"`
+    *   如禁用则立即退出
+4.  **读取 PTY 符号链接前缀**
+    *   从 `<platform_path>/udevprefix.conf` 读取设备前缀（如 `C0-`）
+    *   构造虚拟设备前缀 `/dev/V<prefix>`（如 `/dev/VC0-`）
+5.  **初始化 Proxy 实例**
+    *   为 CONFIG_DB 中的每个串口配置：
+        *   打开物理串口（如 `/dev/C0-1`）
+        *   创建 PTY 对（master/slave，如 `/dev/pts/X`）
+        *   创建符号链接（如 `/dev/VC0-1` → `/dev/pts/3`）
+        *   配置串口和 PTY 为 raw 模式
+        *   将文件描述符注册到 asyncio 事件循环
+        *   启动心跳超时定时器（15 秒）
+6.  **订阅配置变更**
+    *   监听 CONFIG_DB keyspace 事件以动态重配置
+7.  **进入主循环**
+    *   处理串口数据，过滤心跳，更新 STATE_DB
+8.  **初始状态**
+    *   15 秒内无心跳，`oper_state` 设为 `down`
+    *   收到首个心跳后，`oper_state` 变为 `up`，记录 `last_heartbeat` 时间戳
 
 #### 3.3.6 动态配置变更
 
-    监听 CONFIG_DB 配置变更事件
-    动态添加、删除或重启链路的 Proxy 实例
+*   监听 CONFIG_DB 配置变更事件
+*   动态添加、删除或重启链路的 Proxy 实例
 
 #### 3.3.7 服务关闭与清理
 
 当 console-monitor 服务收到关闭信号（SIGINT/SIGTERM）时，每个 proxy 执行清理：
 
-    STATE_DB 清理
-        仅删除 `oper_state` 和 `last_heartbeat` 字段
-        保留 consutil 管理的 `state`、`pid`、`start_time` 字段
-
-    PTY 符号链接
-        删除符号链接（如 `/dev/VC0-1`）
-
-    Buffer 刷新
-        如 filter buffer 非空，刷新到 PTY
+*   **STATE_DB 清理**
+    *   仅删除 `oper_state` 和 `last_heartbeat` 字段
+    *   保留 consutil 管理的 `state`、`pid`、`start_time` 字段
+*   **PTY 符号链接**
+    *   删除符号链接（如 `/dev/VC0-1`）
+*   **Buffer 刷新**
+    *   如 filter buffer 非空，刷新到 PTY
 
 ---
 
