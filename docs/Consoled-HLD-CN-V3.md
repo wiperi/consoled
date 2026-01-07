@@ -194,6 +194,22 @@ DTE 周期性向串口发送特定格式的心跳帧。
 | CRC16 | 2 字节 | 校验和，大端序（高字节在前） |
 | EOF | 1 字节 | 帧结束，固定 0x04 |
 
+**帧长度限制：**
+
+    最大 Payload 长度
+        24 字节（Length 字段最大值 0x18）
+
+    最大帧长度（逻辑）
+        7 + 24 = 31 字节（不含 SOF/EOF）
+
+    Buffer 大小
+        31 字节（存储去转义后的帧内容）
+
+    设计说明
+        转义处理在字节入 buffer 前完成
+        buffer 只存储逻辑帧内容，不含 SOF/DLE/EOF
+        简化长度计算和溢出检测
+
 **CRC16 计算：**
 
     算法
@@ -293,35 +309,96 @@ flowchart TD
 
 超时周期默认 15 秒。如果在此期间未收到心跳，链路状态判定为 Down。
 
-#### 3.3.3 心跳帧检测与过滤
+#### 3.3.3 帧检测与过滤
 
-为应对 read() 调用可能返回部分心跳帧的情况，实现了滑动缓冲区机制（类似 KMP 算法）：
+使用状态机进行帧检测，转义处理在字节入 buffer 前完成：
 
-算法：
+**Buffer 设计：**
 
-    Buffer 大小
-        `heartbeat_length - 1` 字节
+    帧 Buffer
+        31 字节（存储去转义后的帧内容：Version 到 CRC16）
 
-    数据读取时
-        将新数据追加到滑动缓冲区末尾
+    设计原则
+        SOF、DLE、EOF 不入 buffer
+        只有实际数据字节（已去转义）才入 buffer
+        buffer 内容 = 帧逻辑内容
 
-    模式匹配
-        检测到完整心跳 → 更新心跳计时器，清空 buffer
-        前缀匹配失败或 buffer 满 → 清空 buffer，透传数据
-        1 秒内未匹配成功 → 透传 buffer 内容，防止数据阻塞
+**状态机定义：**
 
-状态图：
+| 状态 | 描述 |
+|------|------|
+| IDLE | 等待 SOF (0x01)，其他字节透传到 PTY |
+| RECEIVING | 接收帧数据，遇 DLE 进入 ESCAPED |
+| ESCAPED | 收到 DLE (0x10)，等待下一字节并去转义 |
+| COMPLETE | 收到 EOF (0x04)，帧接收完成 |
+
+**状态转换：**
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    
+    IDLE --> IDLE: 非 SOF 字节\n透传到 PTY
+    IDLE --> RECEIVING: 收到 SOF (0x01)\n不入 buffer
+    
+    RECEIVING --> ESCAPED: 收到 DLE (0x10)\n不入 buffer
+    RECEIVING --> COMPLETE: 收到 EOF (0x04)\n不入 buffer
+    RECEIVING --> RECEIVING: 普通字节\n入 buffer
+    RECEIVING --> IDLE: buffer 溢出或超时\n透传 buffer 内容
+    
+    ESCAPED --> RECEIVING: 任意字节\n去转义后入 buffer
+    ESCAPED --> IDLE: 超时\n透传 buffer 内容
+    
+    COMPLETE --> IDLE: CRC 校验成功\n处理帧，更新状态
+    COMPLETE --> IDLE: CRC 校验失败\n丢弃帧，记录错误
+```
+
+**检测算法：**
+
+    1. 等待 SOF
+        在 IDLE 状态，逐字节扫描
+        非 SOF 字节直接透传到 PTY
+        收到 SOF 进入 RECEIVING 状态（SOF 不入 buffer）
+
+    2. 接收帧数据
+        收到 DLE (0x10)：进入 ESCAPED 状态（DLE 不入 buffer）
+        收到 EOF (0x04)：帧接收完成，进入 COMPLETE 状态（EOF 不入 buffer）
+        其他字节：直接入 buffer
+
+    3. 处理转义
+        在 ESCAPED 状态收到任意字节，去转义后入 buffer
+        例如：DLE + 0x01 → 0x01 入 buffer（作为数据，非 SOF）
+        例如：DLE + 0x10 → 0x10 入 buffer（作为数据，非 DLE）
+
+    4. 验证帧
+        检查 buffer 长度 ≥ 7（最小帧：Version+Seq+Flag+Type+Length+CRC16）
+        检查 Length 字段与实际 Payload 长度一致
+        计算并验证 CRC16
+        校验成功：提取帧内容，根据 Type 处理
+        校验失败：丢弃帧，记录错误日志
+
+    5. 超时处理
+        RECEIVING/ESCAPED 状态超过 1 秒未收到 EOF
+        将 buffer 内容透传到 PTY（加上 SOF 前缀）
+        返回 IDLE 状态
+
+    6. 溢出处理
+        buffer 超过 31 字节仍未收到 EOF
+        透传 buffer 内容，返回 IDLE 状态
+
+**帧处理流程：**
 
 ```mermaid
 flowchart TD
-    A["读取数据"] --> B["追加到 Buffer"]
-    B --> C{"检测到心跳?"}
-    C -->|是| D["更新计时器, 清空 Buffer"]
-    C -->|否| E{"前缀匹配失败或 Buffer 满?"}
-    E -->|是| F["清空 Buffer, 透传数据"]
-    E -->|否| G{"超时 1s?"}
-    G -->|是| H["透传 Buffer 内容"]
-    G -->|否| I["等待更多数据"]
+    A["收到完整帧"] --> B{"CRC16 校验"}
+    B -->|失败| C["丢弃帧, 记录错误"]
+    B -->|成功| D{"检查 Type"}
+    D -->|HEARTBEAT| E["重置心跳定时器"]
+    E --> F["更新 STATE_DB"]
+    D -->|其他| G["按类型处理或忽略"]
+    C --> H["返回 IDLE"]
+    F --> H
+    G --> H
 ```
 
 #### 3.3.4 Oper 状态判定
