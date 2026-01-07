@@ -148,10 +148,9 @@ class Frame:
         流程:
         1. 构造帧头 (SOF x 3)
         2. 构造帧内容 (Version + Seq + Flag + Type + Length + Payload)
-        3. 对整个帧内容进行转义
-        4. 计算 CRC16 (基于转义后的内容)
-        5. 对 CRC16 进行转义
-        6. 构造帧尾 (EOF x 3)
+        3. 计算 CRC16 (基于原始未转义内容)
+        4. 对整个帧内容（包括 CRC16）进行转义
+        5. 构造帧尾 (EOF x 3)
         
         Returns:
             完整的帧二进制数据
@@ -166,18 +165,18 @@ class Frame:
             len(self.payload),  # 原始 payload 长度
         ]) + self.payload
         
-        # 转义帧内容 (header + payload)
-        escaped_content = escape_data(content)
-        
-        # 计算 CRC16 (基于转义后的内容)
-        crc = crc16_modbus(escaped_content)
+        # 计算 CRC16 (基于原始未转义内容)
+        crc = crc16_modbus(content)
         crc_bytes = bytes([crc >> 8, crc & 0xFF])  # 大端序
         
-        # 转义 CRC
-        escaped_crc = escape_data(crc_bytes)
+        # 拼接内容和 CRC
+        content_with_crc = content + crc_bytes
+        
+        # 对整个内容（包括 CRC）进行转义
+        escaped_content = escape_data(content_with_crc)
         
         # 组装完整帧
-        return SOF_SEQUENCE + escaped_content + escaped_crc + EOF_SEQUENCE
+        return SOF_SEQUENCE + escaped_content + EOF_SEQUENCE
     
     @classmethod
     def parse(cls, buffer: bytes) -> Optional['Frame']:
@@ -187,9 +186,10 @@ class Frame:
         buffer 应该是去除帧头帧尾后的原始数据（包含转义字符）
         
         流程:
-        1. 验证最小长度 (Version + Seq + Flag + Type + Length + CRC16 = 7 bytes)
-        2. CRC16 校验 (使用 buffer 中的数据，不含最后 2-4 字节的 CRC)
-        3. 校验通过后去转义提取数据
+        1. 先对 buffer 进行去转义
+        2. 验证最小长度 (Version + Seq + Flag + Type + Length + CRC16 = 7 bytes)
+        3. CRC16 校验 (使用去转义后的数据)
+        4. 校验通过后提取各字段
         
         Args:
             buffer: 去除帧头帧尾后的原始数据
@@ -197,55 +197,42 @@ class Frame:
         Returns:
             解析成功返回 Frame 对象，失败返回 None
         """
+        # 先去转义
+        unescaped = unescape_data(buffer)
+        
         # 最小长度检查: Version(1) + Seq(1) + Flag(1) + Type(1) + Length(1) + CRC(2) = 7
-        # 但由于转义，CRC 可能变成 4 字节，所以最小是 7 字节
-        if len(buffer) < 7:
+        if len(unescaped) < 7:
             return None
         
-        # 找到 CRC 的边界
-        # CRC 是最后的 2 个字节（去转义后），但在 buffer 中可能是 2-4 字节
-        # 需要从后向前解析
+        # 分离内容和 CRC
+        content = unescaped[:-2]
+        crc_bytes = unescaped[-2:]
         
-        # 策略: 尝试不同的 CRC 长度 (2, 3, 4 字节对应转义后的可能性)
-        for crc_escaped_len in range(2, 5):
-            if len(buffer) < 5 + crc_escaped_len:
-                continue
-            
-            content_with_escape = buffer[:-crc_escaped_len]
-            crc_escaped = buffer[-crc_escaped_len:]
-            
-            # 去转义 CRC
-            crc_bytes = unescape_data(crc_escaped)
-            if len(crc_bytes) != 2:
-                continue
-            
-            # 计算期望的 CRC
-            expected_crc = crc16_modbus(content_with_escape)
-            received_crc = (crc_bytes[0] << 8) | crc_bytes[1]
-            
-            if expected_crc == received_crc:
-                # CRC 校验通过，解析帧内容
-                content = unescape_data(content_with_escape)
-                
-                if len(content) < 5:
-                    return None
-                
-                version = content[0]
-                seq = content[1]
-                flag = content[2]
-                frame_type = content[3]
-                length = content[4]
-                payload = content[5:5 + length] if length > 0 else b""
-                
-                return cls(
-                    version=version,
-                    seq=seq,
-                    flag=flag,
-                    frame_type=frame_type,
-                    payload=payload,
-                )
+        # 计算期望的 CRC
+        expected_crc = crc16_modbus(content)
+        received_crc = (crc_bytes[0] << 8) | crc_bytes[1]
         
-        return None
+        if expected_crc != received_crc:
+            return None
+        
+        # CRC 校验通过，解析帧内容
+        if len(content) < 5:
+            return None
+        
+        version = content[0]
+        seq = content[1]
+        flag = content[2]
+        frame_type = content[3]
+        length = content[4]
+        payload = content[5:5 + length] if length > 0 else b""
+        
+        return cls(
+            version=version,
+            seq=seq,
+            flag=flag,
+            frame_type=frame_type,
+            payload=payload,
+        )
     
     @classmethod
     def create_heartbeat(cls, seq: int = 0) -> 'Frame':
