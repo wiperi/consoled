@@ -1,7 +1,9 @@
 *.tt
 tt.*
+*.tt.*
 *_tt
 tt_*
+*_tt_*
 
 __pycache__/
 *.py[cod]

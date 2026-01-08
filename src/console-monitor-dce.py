@@ -22,7 +22,7 @@ from typing import Optional, Any
 import redis.asyncio as aioredis
 from sonic_py_common import device_info
 
-from src.frame import Frame, FrameFilter
+from frame import Frame, FrameFilter
 
 logging.basicConfig(
     level=logging.INFO,

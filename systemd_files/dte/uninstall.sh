@@ -1,43 +1,44 @@
 #!/bin/bash
 # uninstall.sh
 # 
-# 卸载 console-heartbeat 服务的脚本
+# 卸载 console-monitor-dte 服务的脚本
 # 需要 root 权限运行
 
 set -e
 
-echo "Uninstalling console-heartbeat service..."
+echo "Uninstalling console-monitor-dte service..."
 
 # 1. 停止所有运行中的服务实例
 echo "  Stopping running services..."
-for service in $(systemctl list-units --type=service --all | grep 'console-heartbeat@' | awk '{print $1}'); do
+for service in $(systemctl list-units --type=service --all | grep 'console-monitor-dte@' | awk '{print $1}'); do
     echo "    Stopping $service..."
     sudo systemctl stop "$service" 2>/dev/null || true
 done
 
 # 2. 禁用服务（如果有手动启用的）
 echo "  Disabling services..."
-sudo systemctl disable 'console-heartbeat@*.service' 2>/dev/null || true
+sudo systemctl disable 'console-monitor-dte@*.service' 2>/dev/null || true
 
 # 3. 删除服务模板
 echo "  Removing service template..."
-sudo rm -f /lib/systemd/system/console-heartbeat@.service
+sudo rm -f /lib/systemd/system/console-monitor-dte@.service
 
 # 4. 删除 generator
 echo "  Removing generator..."
-sudo rm -f /lib/systemd/system-generators/console-heartbeat-generator
+sudo rm -f /lib/systemd/system-generators/console-monitor-dte-generator
 
 # 5. 删除 daemon 脚本
 echo "  Removing daemon script..."
-sudo rm -f /usr/local/bin/console-heartbeat-daemon
+sudo rm -f /usr/local/bin/console-monitor-dte
+sudo rm -f /usr/local/lib/frame.py
 
 # 6. 清理运行时配置目录
 echo "  Cleaning up runtime files..."
-sudo rm -rf /run/console-heartbeat
+sudo rm -rf /run/console-monitor-dte
 
 # 7. 清理 generator 生成的符号链接
 echo "  Cleaning up generated symlinks..."
-sudo rm -f /run/systemd/generator/multi-user.target.wants/console-heartbeat@*.service
+sudo rm -f /run/systemd/generator/multi-user.target.wants/console-monitor-dte@*.service
 
 # 8. 重新加载 systemd
 echo "  Reloading systemd..."

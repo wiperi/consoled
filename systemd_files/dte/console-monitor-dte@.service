@@ -1,0 +1,17 @@
+[Unit]
+Description=Console Monitor DTE Service on %I
+Documentation=man:systemd-getty-generator(8)
+After=dev-%i.device systemd-user-sessions.service
+Wants=dev-%i.device
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/console-monitor-dte %I
+Restart=always
+RestartSec=5
+
+# 环境文件用于传递波特率（由generator生成，可选）
+EnvironmentFile=-/run/console-monitor-dte/%I.conf
+
+[Install]
+WantedBy=multi-user.target

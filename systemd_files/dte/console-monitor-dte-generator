@@ -1,8 +1,8 @@
 #!/bin/bash
-# console-heartbeat-generator
+# console-monitor-dte-generator
 # 
 # 这是一个 systemd generator 脚本
-# 放置位置: /lib/systemd/system-generators/console-heartbeat-generator
+# 放置位置: /lib/systemd/system-generators/console-monitor-dte-generator
 # 
 # Generator 在启动时被调用，参数为:
 #   $1 = normal-dir   (通常是 /run/systemd/generator)
@@ -16,7 +16,7 @@ EARLY_DIR="$2"
 LATE_DIR="$3"
 
 # 创建配置目录
-mkdir -p /run/console-heartbeat
+mkdir -p /run/console-monitor-dte
 
 # 读取 kernel 命令行参数
 CMDLINE=$(cat /proc/cmdline)
@@ -42,14 +42,14 @@ parse_console_args() {
             echo "Found console: $tty with baudrate: $baudrate"
             
             # 生成服务实例的环境配置文件
-            echo "BAUDRATE=$baudrate" > "/run/console-heartbeat/${tty}.conf"
-            echo "TTY_DEVICE=/dev/${tty}" >> "/run/console-heartbeat/${tty}.conf"
+            echo "BAUDRATE=$baudrate" > "/run/console-monitor-dte/${tty}.conf"
+            echo "TTY_DEVICE=/dev/${tty}" >> "/run/console-monitor-dte/${tty}.conf"
             
             # 在 generator 目录中创建服务实例的符号链接
             # 这会让 systemd 自动启动对应的服务实例
             mkdir -p "${NORMAL_DIR}/multi-user.target.wants"
-            ln -sf "/lib/systemd/system/console-heartbeat@.service" \
-                   "${NORMAL_DIR}/multi-user.target.wants/console-heartbeat@${tty}.service"
+            ln -sf "/lib/systemd/system/console-monitor-dte@.service" \
+                   "${NORMAL_DIR}/multi-user.target.wants/console-monitor-dte@${tty}.service"
         fi
     done
 }
