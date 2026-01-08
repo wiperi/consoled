@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""
+Console Monitor DCE - Wrapper Script
+
+This is a simple wrapper to launch the console-monitor daemon.
+"""
+
+from console_monitor.dce import run
+
+if __name__ == "__main__":
+    run()

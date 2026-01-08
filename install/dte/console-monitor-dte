@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""
+Console Monitor DTE - Wrapper Script
+
+This is a simple wrapper to launch the console-monitor-dte daemon.
+"""
+
+from console_monitor.dte import run
+
+if __name__ == "__main__":
+    run()

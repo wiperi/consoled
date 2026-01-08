@@ -10,7 +10,7 @@ from typing import Optional
 
 import redis.asyncio as aioredis
 
-from constants import REDIS_HOST, REDIS_PORT, REDIS_DB, STATE_DB, KEY_PATTERN
+from .constants import REDIS_HOST, REDIS_PORT, REDIS_DB, STATE_DB, KEY_PATTERN
 
 log = logging.getLogger(__name__)
 

@@ -10,19 +10,20 @@ echo "Uninstalling console-monitor service..."
 
 # 1. 停止服务
 echo "  Stopping service..."
-sudo systemctl stop console-monitor.service 2>/dev/null || true
+sudo systemctl stop console-monitor-dce.service 2>/dev/null || true
 
 # 2. 禁用服务
 echo "  Disabling service..."
-sudo systemctl disable console-monitor.service 2>/dev/null || true
+sudo systemctl disable console-monitor-dce.service 2>/dev/null || true
 
 # 3. 删除服务单元文件
 echo "  Removing service unit..."
-sudo rm -f /etc/systemd/system/console-monitor.service
+sudo rm -f /etc/systemd/system/console-monitor-dce.service
 
-# 4. 删除 daemon 脚本
-echo "  Removing daemon script..."
-sudo rm -f /usr/local/bin/console-monitor.py
+# 4. 删除 Python 包和可执行 wrapper
+echo "  Removing Python package and wrapper..."
+sudo rm -rf /usr/lib/python3/dist-packages/console_monitor
+sudo rm -f /usr/local/bin/console-monitor-dce
 
 # 5. 清理 PTY 符号链接（如果服务异常退出未清理）
 echo "  Cleaning up PTY symlinks..."

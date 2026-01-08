@@ -11,9 +11,9 @@ import signal
 import logging
 from typing import Optional
 
-from db_util import DbUtil
-from serial_proxy import SerialProxy
-from util import get_pty_symlink_prefix
+from .db_util import DbUtil
+from .serial_proxy import SerialProxy
+from .util import get_pty_symlink_prefix
 
 logging.basicConfig(
     level=logging.INFO,
@@ -151,5 +151,10 @@ async def main() -> None:
         await manager.stop()
 
 
-if __name__ == "__main__":
+def run():
+    """Entry point for the console-monitor daemon"""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()

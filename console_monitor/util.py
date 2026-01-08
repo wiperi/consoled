@@ -11,7 +11,7 @@ import tty
 import logging
 
 from sonic_py_common import device_info
-from constants import BAUD_MAP
+from .constants import BAUD_MAP
 
 log = logging.getLogger(__name__)
 

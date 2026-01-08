@@ -27,10 +27,10 @@ sudo rm -f /lib/systemd/system/console-monitor-dte@.service
 echo "  Removing generator..."
 sudo rm -f /lib/systemd/system-generators/console-monitor-dte-generator
 
-# 5. 删除 daemon 脚本
-echo "  Removing daemon script..."
+# 5. 删除 daemon 脚本和 Python 包
+echo "  Removing daemon script and Python package..."
 sudo rm -f /usr/local/bin/console-monitor-dte
-sudo rm -f /usr/local/lib/frame.py
+sudo rm -rf /usr/lib/python3/dist-packages/console_monitor
 
 # 6. 清理运行时配置目录
 echo "  Cleaning up runtime files..."
