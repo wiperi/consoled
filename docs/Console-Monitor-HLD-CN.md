@@ -19,7 +19,7 @@
 - [3. 详细设计](#3-详细设计)
   - [3.1 帧结构设计](#31-帧结构设计)
   - [3.2 DTE 侧服务](#32-dte-侧服务)
-  - [3.3 DCE 侧 Console Monitor 服务](#33-dce-侧-console-monitor-服务)
+  - [3.3 DCE 侧 Console Monitor DCE 服务](#33-dce-侧-console-monitor-dce-服务)
 - [4. 数据库更改](#4-数据库更改)
 - [5. CLI](#5-cli)
 - [6. 流程图](#6-流程图)
@@ -82,7 +82,7 @@ flowchart LR
 
   subgraph DTE["DTE (SONiC Switch)"]
     serial_getty["serial-getty@tty_dte.service"]
-    hb_sender["console-heartbeat.service"]
+    hb_sender["console-monitor-dte.service"]
     TTY_DTE["/dev/tty_dte (physical serial)"]
   end
 
@@ -360,7 +360,7 @@ def on_read_timeout():
 
 ### 3.2 DTE 侧服务
 
-#### 3.2.1 服务: `console-heartbeat@<DEVICE_NAME>.service`
+#### 3.2.1 服务: `console-monitor-dte@<DEVICE_NAME>.service`
 
 DTE 侧服务以固定 5 秒间隔周期性发送心跳帧。
 
@@ -373,7 +373,7 @@ DTE 侧服务以固定 5 秒间隔周期性发送心跳帧。
 
 #### 3.2.2 服务启动与管理
 
-DTE 侧服务使用 systemd generator 根据内核命令行参数中的串口配置自动创建 `console-heartbeat@.service` 实例。
+DTE 侧服务使用 systemd generator 根据内核命令行参数中的串口配置自动创建 `console-monitor-dte@.service` 实例。
 
 Generator 读取这些参数，在 `/run/systemd/generator/` 下创建对应的 wants 链接，使每个服务实例无需手动配置即可周期性发送心跳帧。
 
@@ -383,24 +383,24 @@ flowchart TD
   B --> C["/proc/cmdline 可用"]
   C --> D["systemd (PID 1) 启动"]
   D --> E["systemd 加载单元并运行 generators"]
-  E --> F["console-heartbeat-generator 运行"]
+  E --> F["console-monitor-dte-generator 运行"]
   F --> G["generator 读取 /proc/cmdline"]
   G --> H["generator 发现 console=DEVICE,9600"]
   H --> I["generator 在 /run/systemd/generator/multi-user.target.wants 下创建 wants 链接"]
   I --> J["systemd 构建依赖图"]
   J --> K["multi-user.target 启动"]
-  K --> L["console-heartbeat@DEVICE.service 被拉起"]
-  L --> M["console-heartbeat@.service 模板被实例化"]
-  M --> N["ExecStart 运行 console-heartbeat-daemon"]
+  K --> L["console-monitor-dte@DEVICE.service 被拉起"]
+  L --> M["console-monitor-dte@.service 模板被实例化"]
+  M --> N["ExecStart 运行 console-monitor-dte"]
   N --> O["daemon 打开 /dev/DEVICE"]
   O --> P["每 5s 向 /dev/DEVICE 写入心跳"]
 ```
 
 ---
 
-### 3.3 DCE 侧 Console Monitor 服务
+### 3.3 DCE 侧 Console Monitor DCE 服务
 
-#### 3.3.1 服务: `console-monitor.service`
+#### 3.3.1 服务: `console-monitor-dce.service`
 
 拓扑：
 
@@ -424,7 +424,7 @@ STATE_DB 条目：
 
 #### 3.3.5 服务启动与初始化
 
-console-monitor 服务按以下顺序启动：
+console-monitor-dce 服务按以下顺序启动：
 
 1.  **等待依赖**
     *   在 `config-setup.service` 完成将 config.json 加载到 CONFIG_DB 后启动
@@ -459,7 +459,7 @@ console-monitor 服务按以下顺序启动：
 
 #### 3.3.7 服务关闭与清理
 
-当 console-monitor 服务收到关闭信号（SIGINT/SIGTERM）时，每个 proxy 执行清理：
+当 console-monitor-dce 服务收到关闭信号（SIGINT/SIGTERM）时，每个 proxy 执行清理：
 
 *   **STATE_DB 清理**
     *   仅删除 `oper_state` 和 `last_heartbeat` 字段

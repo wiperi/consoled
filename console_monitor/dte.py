@@ -144,6 +144,8 @@ def main():
     sender = HeartbeatSender(device_path)
     sender.run()
 
+def run():
+    main()
 
 if __name__ == '__main__':
     main()

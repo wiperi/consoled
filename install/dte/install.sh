@@ -29,10 +29,15 @@ sudo cp "${SCRIPT_DIR}/console-monitor-dte@.service" /lib/systemd/system/
 
 # 4. 安装 generator
 echo "  Installing generator..."
-sudo cp "${SCRIPT_DIR}/console-monitor-dte-generator" /lib/systemd/system-generators/
+sudo cp "${SCRIPT_DIR}/console-monitor-dte-generator" /lib/systemd/system-generators/console-monitor-dte-generator
 sudo chmod +x /lib/systemd/system-generators/console-monitor-dte-generator
 
-# 5. 重新加载 systemd
+# 5. 屏蔽系统默认的 getty generator
+echo "  Disabling default systemd-getty-generator..."
+sudo mkdir -p /etc/systemd/system-generators
+sudo ln -sf /dev/null /etc/systemd/system-generators/systemd-getty-generator
+
+# 6. 重新加载 systemd
 echo "  Reloading systemd..."
 sudo systemctl daemon-reload
 
