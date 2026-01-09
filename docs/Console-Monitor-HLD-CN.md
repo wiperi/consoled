@@ -75,40 +75,57 @@ flowchart LR
   subgraph DCE["DCE (Console Server)"]
     proxy_dce["proxy"]
     picocom["picocom (user)"]
-    pty_master["pty_master"]
-    pty_slave["pty_slave"]
+    pty_master_dce["pty_master"]
+    pty_slave_dce["pty_slave"]
     TTY_DCE["/dev/tty_dce (physical serial)"]
   end
 
   subgraph DTE["DTE (SONiC Switch)"]
-    serial_getty["serial-getty@tty_dte.service"]
-    hb_sender["console-monitor-dte.service"]
-    TTY_DTE["/dev/tty_dte (physical serial)"]
+    shell["shell/user"]
+    pty_slave_dte["pty_slave (/dev/VttyS0)"]
+    pty_master_dte["pty_master"]
+    proxy_dte["console-monitor-dte.service"]
+    TTY_DTE["/dev/ttyS0 (physical serial)"]
   end
 
-  %% DTE side: services attached to the physical serial
-  serial_getty <-- read/write --> TTY_DTE
-  hb_sender -- heartbeat --> TTY_DTE
+  %% DTE side: proxy owns serial, creates PTY, sends heartbeat
+  shell <-- session --> pty_slave_dte
+  pty_slave_dte <-- PTY pair --> pty_master_dte
+  pty_master_dte <-- forward --> proxy_dte
+  proxy_dte <-- read/write --> TTY_DTE
+  proxy_dte -- heartbeat --> TTY_DTE
 
   %% physical link
-  TTY_DCE <-- serial link --> TTY_DTE
+  TTY_DTE <-- serial link --> TTY_DCE
 
   %% DCE side: proxy owns serial, filters RX, bridges to PTY for user tools
   TTY_DCE <-- read/write --> proxy_dce
-  proxy_dce -- filter heartbeat and forward --> pty_master
-  pty_master -- forward --> proxy_dce
-  pty_master <-- PTY pair --> pty_slave
-  picocom <-- interactive session --> pty_slave
+  proxy_dce -- filter heartbeat and forward --> pty_master_dce
+  pty_master_dce -- forward --> proxy_dce
+  pty_master_dce <-- PTY pair --> pty_slave_dce
+  picocom <-- interactive session --> pty_slave_dce
 ```
 
-设计核心：将 DCE 侧直接的"用户 ↔ 串口"访问模式转变为"用户 ↔ Proxy ↔ 串口"模式。
+设计核心：
+- DTE 侧：将"用户 ↔ 串口"访问模式转变为"用户 ↔ PTY ↔ Proxy ↔ 串口"模式
+- DCE 侧：将"用户 ↔ 串口"访问模式转变为"用户 ↔ PTY ↔ Proxy ↔ 串口"模式
+- 两侧 Proxy 均独占物理串口，通过 PTY 与上层应用交互
 
 ### 2.2 DTE 侧
 
-DTE 周期性向串口发送特定格式的心跳帧。
+DTE 侧创建 PTY 代理，实现串口与上层应用的隔离，并周期性发送心跳帧。
 
-*   **单向数据流**
-    *   DTE → DCE 方向，保证 DTE 重启阶段不会收到 DCE 侧协议干扰数据
+*   **PTY 代理模式**
+    *   Proxy 独占物理串口（如 `/dev/ttyS0`）
+    *   创建 PTY 对供上层应用使用
+    *   创建符号链接（如 `/dev/VttyS0`）指向 PTY slave
+*   **数据转发**
+    *   串口数据透明转发到 PTY
+    *   PTY 数据透明转发到串口
+*   **心跳机制**
+    *   每 5 秒检查 STATE_DB 中 `CONSOLE_SWITCH|agent` 的 `enabled` 字段
+    *   仅在 enabled 时发送心跳帧
+    *   DTE → DCE 单向发送，保证 DTE 重启阶段不会收到干扰数据
 *   **碰撞风险**
     *   正常数据流中可能包含心跳帧格式的数据，导致误判
     *   通过心跳帧设计降低碰撞概率
@@ -360,22 +377,65 @@ def on_read_timeout():
 
 ### 3.2 DTE 侧服务
 
-#### 3.2.1 服务: `console-monitor-dte@<DEVICE_NAME>.service`
+#### 3.2.1 服务: `console-monitor-dte.service`
 
-DTE 侧服务以固定 5 秒间隔周期性发送心跳帧。
+DTE 侧服务实现串口代理和心跳发送功能。
 
-*   **发送周期**
-    *   固定 5 秒
-*   **服务实例**
-    *   使用 systemd 模板单元按串口生成
-*   **自动激活**
-    *   由 systemd generator 根据内核命令行参数创建
+*   **启动流程**
+    1.  读取 `/proc/cmdline` 解析 `console=<TTYNAME>,<BAUD>` 参数
+    2.  打开物理串口（如 `/dev/ttyS0`）
+    3.  创建 PTY 对（master/slave）
+    4.  创建符号链接（如 `/dev/VttyS0` → `/dev/pts/X`）
+    5.  在串口和 PTY 之间双向转发数据
+*   **心跳机制**
+    *   每 5 秒检查 STATE_DB 中 `CONSOLE_SWITCH|agent` 的 `enabled` 字段
+    *   如果为 `"yes"`，发送心跳帧到串口
+    *   如果不为 `"yes"`，不发送心跳
+*   **PTY 符号链接**
+    *   格式：`/dev/V<ttyname>`
+    *   例如：物理串口 `/dev/ttyS0` 对应符号链接 `/dev/VttyS0`
+    *   上层应用（如 shell）使用符号链接访问
 
-#### 3.2.2 服务启动与管理
+#### 3.2.2 架构图
 
-DTE 侧服务使用 systemd generator 根据内核命令行参数中的串口配置自动创建 `console-monitor-dte@.service` 实例。
+```mermaid
+flowchart LR
+  subgraph DTE["DTE (SONiC Switch)"]
+    pty_slave_dte["pty_slave (/dev/VttyS0)"]
+    pty_master_dte["pty_master"]
+    proxy_dte["console-monitor-dte.service"]
+    TTY_DTE["/dev/ttyS0 (physical serial)"]
+    state_db["STATE_DB"]
+  end
 
-Generator 读取这些参数，在 `/run/systemd/generator/` 下创建对应的 wants 链接，使每个服务实例无需手动配置即可周期性发送心跳帧。
+  subgraph DCE["DCE (Console Server)"]
+    TTY_DCE["/dev/tty_dce"]
+  end
+
+  %% DTE side: proxy owns serial, creates PTY
+  pty_slave_dte <-- shell/user --> pty_master_dte
+  pty_master_dte <-- forward --> proxy_dte
+  proxy_dte <-- read/write --> TTY_DTE
+  proxy_dte -- check enabled --> state_db
+  proxy_dte -- heartbeat --> TTY_DTE
+
+  %% physical link
+  TTY_DTE <-- serial link --> TTY_DCE
+```
+
+#### 3.2.3 服务启动与管理
+
+DTE 侧服务使用 systemd 管理，根据内核命令行参数自动配置。
+
+1.  **Generator 运行**
+    *   `console-monitor-dte-generator` 读取 `/proc/cmdline`
+    *   解析 `console=<TTYNAME>,<BAUD>` 参数
+    *   在 `/run/systemd/generator/` 下创建 wants 链接
+
+2.  **服务启动**
+    *   `console-monitor-dte.service` 被 systemd 拉起
+    *   服务读取 `/proc/cmdline` 获取串口配置
+    *   创建 PTY 代理并开始工作
 
 ```mermaid
 flowchart TD
@@ -385,15 +445,17 @@ flowchart TD
   D --> E["systemd 加载单元并运行 generators"]
   E --> F["console-monitor-dte-generator 运行"]
   F --> G["generator 读取 /proc/cmdline"]
-  G --> H["generator 发现 console=DEVICE,9600"]
+  G --> H["generator 发现 console=ttyS0,9600"]
   H --> I["generator 在 /run/systemd/generator/multi-user.target.wants 下创建 wants 链接"]
   I --> J["systemd 构建依赖图"]
   J --> K["multi-user.target 启动"]
-  K --> L["console-monitor-dte@DEVICE.service 被拉起"]
-  L --> M["console-monitor-dte@.service 模板被实例化"]
-  M --> N["ExecStart 运行 console-monitor-dte"]
-  N --> O["daemon 打开 /dev/DEVICE"]
-  O --> P["每 5s 向 /dev/DEVICE 写入心跳"]
+  K --> L["console-monitor-dte.service 被拉起"]
+  L --> M["服务读取 /proc/cmdline"]
+  M --> N["打开 /dev/ttyS0 串口"]
+  N --> O["创建 PTY 对"]
+  O --> P["创建符号链接 /dev/VttyS0"]
+  P --> Q["开始转发数据"]
+  Q --> R["每 5s 检查 STATE_DB 并发送心跳"]
 ```
 
 ---
