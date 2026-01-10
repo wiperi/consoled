@@ -38,7 +38,7 @@ STATE_KEY = "state"
 PID_KEY = "pid"
 START_TIME_KEY = "start_time"
 OPER_STATE_KEY = "oper_state"
-LAST_HEARTBEAT_KEY = "last_heartbeat"
+LAST_STATE_CHANGE_KEY = "last_state_change"
 
 BUSY_FLAG = "busy"
 IDLE_FLAG = "idle"
@@ -154,8 +154,46 @@ class ConsolePortInfo(object):
         return self.cur_state[OPER_STATE_KEY] if OPER_STATE_KEY in self.cur_state else None
 
     @property
-    def last_heartbeat(self):
-        return self.cur_state[LAST_HEARTBEAT_KEY] if LAST_HEARTBEAT_KEY in self.cur_state else None
+    def last_state_change(self):
+        return self.cur_state[LAST_STATE_CHANGE_KEY] if LAST_STATE_CHANGE_KEY in self.cur_state else None
+
+    @property
+    def state_duration(self):
+        """Calculate and format the duration since last state change.
+        Format: XyXdXhXmXs (only shows non-zero parts)
+        """
+        if not self.last_state_change:
+            return None
+        try:
+            import time
+            ts = int(self.last_state_change)
+            now = int(time.time())
+            diff = now - ts
+            if diff < 0:
+                return None
+            
+            # Calculate time components
+            years, remainder = divmod(diff, 365 * 24 * 3600)
+            days, remainder = divmod(remainder, 24 * 3600)
+            hours, remainder = divmod(remainder, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            # Build formatted string, only include non-zero parts
+            parts = []
+            if years > 0:
+                parts.append(f"{years}y")
+            if days > 0:
+                parts.append(f"{days}d")
+            if hours > 0:
+                parts.append(f"{hours}h")
+            if minutes > 0:
+                parts.append(f"{minutes}m")
+            if seconds > 0 or not parts:  # Always show seconds if nothing else
+                parts.append(f"{seconds}s")
+            
+            return "".join(parts)
+        except (ValueError, OSError):
+            return None
 
     @property
     def session_start_date(self):

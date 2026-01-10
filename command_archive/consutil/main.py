@@ -9,7 +9,6 @@ try:
     import click
     import os
     import sys
-    from datetime import datetime
     import utilities_common.cli as clicommon
 
     from tabulate import tabulate
@@ -43,7 +42,7 @@ def show(db, brief):
 
 
     # set table header style
-    header = ["Line", "Baud", "Flow Control", "PID", "Start Time", "Device", "Oper Status", "Last Heartbeat"]
+    header = ["Line", "Baud", "Flow Control", "PID", "Start Time", "Device", "Oper Status", "State Duration"]
     body = []
     for port in ports:
         # runtime information
@@ -53,16 +52,8 @@ def show(db, brief):
         baud = port.baud
         flow_control = "Enabled" if port.flow_control else "Disabled"
         oper_status = port.oper_status if port.oper_status else "-"
-        # Convert timestamp to US-style readable format
-        if port.last_heartbeat:
-            try:
-                ts = int(port.last_heartbeat)
-                last_heartbeat = datetime.fromtimestamp(ts).strftime("%m/%d/%Y %I:%M:%S %p")
-            except (ValueError, OSError):
-                last_heartbeat = port.last_heartbeat
-        else:
-            last_heartbeat = "-"
-        body.append([busy+port.line_num, baud if baud else "-", flow_control, pid if pid else "-", date if date else "-", port.remote_device if port.remote_device else "-", oper_status, last_heartbeat])
+        state_duration = port.state_duration if port.state_duration else "-"
+        body.append([busy+port.line_num, baud if baud else "-", flow_control, pid if pid else "-", date if date else "-", port.remote_device if port.remote_device else "-", oper_status, state_duration])
     click.echo(tabulate(body, header, stralign='right'))
 
 # 'clear' subcommand
