@@ -40,6 +40,7 @@ class SerialProxy:
         self.running: bool = False
         self._timeout_handle: Optional[asyncio.TimerHandle] = None
         self._heartbeat_handle: Optional[asyncio.TimerHandle] = None
+        self._current_oper_state: Optional[str] = None  # 当前运行状态
 
     async def start(self) -> bool:
         """启动代理"""
@@ -189,7 +190,10 @@ class SerialProxy:
         self._update_state("down")
 
     def _update_state(self, oper_state: str) -> None:
-        """异步更新 Redis 状态（fire-and-forget）"""
+        """异步更新 Redis 状态（仅在状态变化时更新）"""
+        if oper_state == self._current_oper_state:
+            return  # 状态未变化，不更新
+        self._current_oper_state = oper_state
         asyncio.create_task(self.db.update_state(self.link_id, oper_state))
 
     def _on_timeout(self) -> None:

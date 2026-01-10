@@ -107,26 +107,22 @@ class DbUtil:
         return configs
     
     async def update_state(self, link_id: str, oper_state: str) -> None:
-        """更新串口状态（只有 up 时更新 heartbeat）"""
+        """更新串口状态（状态变化时更新 last_state_change）"""
         if not self.state_db:
             return
         
         key = f"CONSOLE_PORT|{link_id}"
         
         try:
-            if oper_state == "up":
-                timestamp = int(time.time())
-                await self.state_db.hset(  # type: ignore
-                    key,
-                    mapping={
-                        "oper_state": oper_state,
-                        "last_heartbeat": str(timestamp),
-                    }
-                )
-                log.info(f"[{link_id}] State: {oper_state}, heartbeat: {timestamp}")
-            else:
-                await self.state_db.hset(key, "oper_state", oper_state)  # type: ignore
-                log.info(f"[{link_id}] State: {oper_state}")
+            timestamp = int(time.time())
+            await self.state_db.hset(  # type: ignore
+                key,
+                mapping={
+                    "oper_state": oper_state,
+                    "last_state_change": str(timestamp),
+                }
+            )
+            log.info(f"[{link_id}] State: {oper_state}, state_change: {timestamp}")
         except Exception as e:
             log.error(f"[{link_id}] Failed to update state: {e}")
     
@@ -139,7 +135,7 @@ class DbUtil:
         
         try:
             # 只删除 console-monitor 管理的字段，保留 consutil 的字段
-            await self.state_db.hdel(key, "oper_state", "last_heartbeat")  # type: ignore
-            log.info(f"[{link_id}] STATE_DB cleaned up (oper_state, last_heartbeat)")
+            await self.state_db.hdel(key, "oper_state", "last_state_change")  # type: ignore
+            log.info(f"[{link_id}] STATE_DB cleaned up (oper_state, last_state_change)")
         except Exception as e:
             log.error(f"[{link_id}] Failed to cleanup STATE_DB: {e}")

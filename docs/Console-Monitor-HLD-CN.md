@@ -483,7 +483,7 @@ STATE_DB 条目：
 
 *   Key: `CONSOLE_PORT|<link_id>`
 *   Field: `oper_state`, Value: `up` / `down`
-*   Field: `last_heartbeat`, Value: `<timestamp>`
+*   Field: `last_state_change`, Value: `<timestamp>`（状态变化时间戳）
 
 #### 3.3.5 服务启动与初始化
 
@@ -515,8 +515,8 @@ console-monitor-dce 服务按以下顺序启动：
 7.  **进入主循环**
     *   处理串口数据，过滤心跳，更新 STATE_DB
 8.  **初始状态**
-    *   15 秒内无心跳，`oper_state` 设为 `down`
-    *   收到首个心跳后，`oper_state` 变为 `up`，记录 `last_heartbeat` 时间戳
+    *   15 秒内无心跳，`oper_state` 设为 `down`，记录 `last_state_change` 时间戳
+    *   收到首个心跳后，`oper_state` 变为 `up`，记录 `last_state_change` 时间戳
 
 #### 3.3.6 动态配置变更
 
@@ -531,7 +531,7 @@ console-monitor-dce 服务按以下顺序启动：
 当 console-monitor-dce 服务收到关闭信号（SIGINT/SIGTERM）时，每个 proxy 执行清理：
 
 *   **STATE_DB 清理**
-    *   仅删除 `oper_state` 和 `last_heartbeat` 字段
+    *   仅删除 `oper_state` 和 `last_state_change` 字段
     *   保留 consutil 管理的 `state`、`pid`、`start_time` 字段
 *   **PTY 符号链接**
     *   删除符号链接（如 `/dev/VC0-1`）
@@ -549,7 +549,7 @@ console-monitor-dce 服务按以下顺序启动：
 | Key 格式 | Field | Value | 描述 |
 |----------|-------|-------|------|
 | `CONSOLE_PORT|<link_id>` | `oper_state` | `up` / `down` | 链路运行状态 |
-| `CONSOLE_PORT|<link_id>` | `last_heartbeat` | `<timestamp>` | 最后心跳接收时间 |
+| `CONSOLE_PORT|<link_id>` | `last_state_change` | `<timestamp>` | 状态变化时间戳 |
 
 ---
 
@@ -564,10 +564,10 @@ admin@sonic:~$ show line
 输出：
 
 ```
-  Line    Baud    Flow Control    PID    Start Time      Device    Oper Status          Last Heartbeat
-------  ------  --------------  -----  ------------  ----------  -------------  ----------------------
-     1    9600        Disabled      -             -   Terminal1             up  12/31/2025 10:11:29 PM
-     2    9600        Disabled      -             -   Terminal2           down                       -
+  Line    Baud    Flow Control    PID    Start Time      Device    Oper Status    State Duration
+------  ------  --------------  -----  ------------  ----------  -------------  ----------------
+     1    9600        Disabled      -             -   Terminal1             up          3d16h34s
+     2    9600        Disabled      -             -   Terminal2           down              1h5m
 ```
 
 新增列：
@@ -575,7 +575,7 @@ admin@sonic:~$ show line
 | 列名 | 描述 |
 |------|------|
 | Oper Status | 控制台链路当前运行状态 |
-| Last Heartbeat | 最近一次心跳接收的时间戳 |
+| State Duration | 当前状态持续时间（格式：XyXdXhXmXs，仅显示非零部分） |
 
 ---
 
@@ -599,7 +599,7 @@ sequenceDiagram
     Proxy->>Proxy: 检查模式匹配
     Proxy-->>Proxy: 检测到完整匹配
     Proxy->>HB: 重置心跳定时器 (15s)
-    Proxy->>Redis: 更新 oper_state=UP, last_heartbeat=now
+    Proxy->>Redis: 若状态变化，更新 oper_state 和 last_state_change
     Proxy->>Buffer: 清空 buffer
     Note over Buffer: 心跳字节被丢弃
 
@@ -618,7 +618,7 @@ sequenceDiagram
     Proxy->>Proxy: 检查模式匹配
     Proxy-->>Proxy: 检测到完整匹配
     Proxy->>HB: 重置心跳定时器 (15s)
-    Proxy->>Redis: 更新 oper_state=UP, last_heartbeat=now
+    Proxy->>Redis: 若状态变化，更新 oper_state 和 last_state_change
     Proxy->>Buffer: 清空 buffer
 
     Note over Serial,Redis: Case 2b: 匹配完成前超时
@@ -637,8 +637,8 @@ sequenceDiagram
 
     Note over Serial,Redis: Case 4: 心跳超时
     HB-->>HB: 15s 无重置
-    HB->>Redis: 更新 oper_state=DOWN
-    Note over Redis: last_heartbeat 保持不变
+    HB->>Redis: 更新 oper_state=DOWN, last_state_change=now
+    Note over Redis: 状态变化时记录时间戳
 ```
 
 ---
