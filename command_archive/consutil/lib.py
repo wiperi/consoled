@@ -37,6 +37,8 @@ FEATURE_ENABLED_KEY = "enabled"
 STATE_KEY = "state"
 PID_KEY = "pid"
 START_TIME_KEY = "start_time"
+OPER_STATE_KEY = "oper_state"
+LAST_HEARTBEAT_KEY = "last_heartbeat"
 
 BUSY_FLAG = "busy"
 IDLE_FLAG = "idle"
@@ -111,6 +113,7 @@ class ConsolePortProvider(object):
                 if k not in keys:
                     port = { LINE_KEY: k }
                     ports.append(port)
+        
         self._ports = ports
 
 class ConsolePortInfo(object):
@@ -145,6 +148,14 @@ class ConsolePortInfo(object):
     @property
     def session_pid(self):
         return self.cur_state[PID_KEY] if PID_KEY in self.cur_state else None
+
+    @property
+    def oper_status(self):
+        return self.cur_state[OPER_STATE_KEY] if OPER_STATE_KEY in self.cur_state else None
+
+    @property
+    def last_heartbeat(self):
+        return self.cur_state[LAST_HEARTBEAT_KEY] if LAST_HEARTBEAT_KEY in self.cur_state else None
 
     @property
     def session_start_date(self):
@@ -346,10 +357,18 @@ class DbUtils(object):
         self._state_db.set(self._state_db.STATE_DB, key, STATE_KEY, state)
         self._state_db.set(self._state_db.STATE_DB, key, PID_KEY, pid)
         self._state_db.set(self._state_db.STATE_DB, key, START_TIME_KEY, date)
+        
+        # Read existing oper_state and last_heartbeat from STATE_DB
+        existing_data = self._state_db.get_all(self._state_db.STATE_DB, key)
+        oper_state = existing_data.get(OPER_STATE_KEY, "") if existing_data else ""
+        last_heartbeat = existing_data.get(LAST_HEARTBEAT_KEY, "") if existing_data else ""
+        
         return {
             STATE_KEY: state,
             PID_KEY: pid,
-            START_TIME_KEY: date
+            START_TIME_KEY: date,
+            OPER_STATE_KEY: oper_state,
+            LAST_HEARTBEAT_KEY: last_heartbeat
         }
 
 class InvalidConfigurationError(Exception):
