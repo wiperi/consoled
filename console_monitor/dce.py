@@ -5,7 +5,6 @@ Console Proxy Service
 监听 Redis 配置，为每个串口创建过滤代理。
 """
 
-import sys
 import asyncio
 import signal
 import logging
@@ -41,19 +40,14 @@ class ProxyManager:
         # 连接数据库
         await self.db.connect()
 
-        # 检查 console switch 功能是否启用
-        if not await self.db.check_console_feature_enabled():
-            log.error("Console switch feature is not enabled, exiting...")
-            sys.exit(1)
-
         # 读取 PTY 符号链接前缀
         self.pty_symlink_prefix = get_pty_symlink_prefix()
         log.info(f"PTY symlink prefix: {self.pty_symlink_prefix}")
 
-        # 初始同步
+        # 初始同步（会检查 console_feature_enabled）
         await self.sync()
 
-        # 订阅配置变更事件
+        # 订阅配置变更事件（包括 CONSOLE_SWITCH 和 CONSOLE_PORT）
         await self.db.subscribe_config_changes()
 
         self.running = True
@@ -69,6 +63,21 @@ class ProxyManager:
     async def sync(self) -> None:
         """同步 Redis 配置和实际 proxy"""
         if not self.loop:
+            return
+
+        # 检查 console switch 功能是否启用
+        feature_enabled = await self.db.check_console_feature_enabled()
+        
+        if not feature_enabled:
+            # 功能未启用，停止所有现有的 proxy
+            if self.proxies:
+                log.info("Console switch feature disabled, stopping all proxies...")
+                await asyncio.gather(
+                    *[proxy.stop() for proxy in self.proxies.values()],
+                    return_exceptions=True
+                )
+                self.proxies.clear()
+                log.info("All proxies stopped due to feature disabled")
             return
 
         # 获取 Redis 中的配置

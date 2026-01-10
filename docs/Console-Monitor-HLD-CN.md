@@ -493,13 +493,18 @@ console-monitor-dce 服务按以下顺序启动：
     *   在 `config-setup.service` 完成将 config.json 加载到 CONFIG_DB 后启动
 2.  **连接 Redis**
     *   建立到 CONFIG_DB 和 STATE_DB 的连接
-3.  **检查 Console 功能**
-    *   验证 CONFIG_DB 中 `CONSOLE_SWITCH|console_mgmt` 的 `enabled` 字段是否为 `"yes"`
-    *   如禁用则立即退出
-4.  **读取 PTY 符号链接前缀**
+3.  **读取 PTY 符号链接前缀**
     *   从 `<platform_path>/udevprefix.conf` 读取设备前缀（如 `C0-`）
     *   构造虚拟设备前缀 `/dev/V<prefix>`（如 `/dev/VC0-`）
-5.  **初始化 Proxy 实例**
+4.  **初始同步（检查 Console 功能）**
+    *   检查 CONFIG_DB 中 `CONSOLE_SWITCH|console_mgmt` 的 `enabled` 字段
+    *   如果 `enabled` 不为 `"yes"`，跳过 Proxy 初始化，服务继续运行但不启动任何 Proxy
+    *   如果 `enabled` 为 `"yes"`，为 CONFIG_DB 中的每个串口配置初始化 Proxy 实例
+5.  **订阅配置变更**
+    *   同时监听以下 CONFIG_DB keyspace 事件：
+        *   `CONSOLE_PORT|*` - 串口配置变更
+        *   `CONSOLE_SWITCH|*` - Console 功能开关变更
+6.  **初始化 Proxy 实例**（仅当 enabled=yes 时）
     *   为 CONFIG_DB 中的每个串口配置：
         *   打开物理串口（如 `/dev/C0-1`）
         *   创建 PTY 对（master/slave，如 `/dev/pts/X`）
@@ -507,8 +512,6 @@ console-monitor-dce 服务按以下顺序启动：
         *   配置串口和 PTY 为 raw 模式
         *   将文件描述符注册到 asyncio 事件循环
         *   启动心跳超时定时器（15 秒）
-6.  **订阅配置变更**
-    *   监听 CONFIG_DB keyspace 事件以动态重配置
 7.  **进入主循环**
     *   处理串口数据，过滤心跳，更新 STATE_DB
 8.  **初始状态**
@@ -517,8 +520,11 @@ console-monitor-dce 服务按以下顺序启动：
 
 #### 3.3.6 动态配置变更
 
-*   监听 CONFIG_DB 配置变更事件
+*   监听 CONFIG_DB 配置变更事件（包括 `CONSOLE_PORT` 和 `CONSOLE_SWITCH`）
 *   动态添加、删除或重启链路的 Proxy 实例
+*   **Console 功能开关响应**：
+    *   当 `CONSOLE_SWITCH|console_mgmt` 的 `enabled` 从 `"yes"` 变为其他值时，停止所有现有 Proxy
+    *   当 `enabled` 变为 `"yes"` 时，根据 `CONSOLE_PORT` 配置启动相应的 Proxy
 
 #### 3.3.7 服务关闭与清理
 

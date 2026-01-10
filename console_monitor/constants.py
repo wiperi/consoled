@@ -12,6 +12,7 @@ REDIS_PORT = 6379
 REDIS_DB = 4          # 配置数据库
 STATE_DB = 6          # 状态数据库
 KEY_PATTERN = "CONSOLE_PORT|*"
+SWITCH_KEY_PATTERN = "CONSOLE_SWITCH|*"
 
 # 超时配置
 FILTER_TIMEOUT = 0.5       # 帧过滤超时（秒）

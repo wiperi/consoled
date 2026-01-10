@@ -10,7 +10,7 @@ from typing import Optional
 
 import redis.asyncio as aioredis
 
-from .constants import REDIS_HOST, REDIS_PORT, REDIS_DB, STATE_DB, KEY_PATTERN
+from .constants import REDIS_HOST, REDIS_PORT, REDIS_DB, STATE_DB, KEY_PATTERN, SWITCH_KEY_PATTERN
 
 log = logging.getLogger(__name__)
 
@@ -67,13 +67,20 @@ class DbUtil:
             return False
     
     async def subscribe_config_changes(self) -> None:
-        """订阅配置变更事件"""
+        """订阅配置变更事件（包括 CONSOLE_PORT 和 CONSOLE_SWITCH）"""
         if not self.config_db:
             return
         self.pubsub = self.config_db.pubsub()
-        pattern = f"__keyspace@{REDIS_DB}__:{KEY_PATTERN}"
-        await self.pubsub.psubscribe(pattern)
-        log.info(f"Subscribed: {pattern}")
+        
+        # 订阅 CONSOLE_PORT 变更
+        port_pattern = f"__keyspace@{REDIS_DB}__:{KEY_PATTERN}"
+        await self.pubsub.psubscribe(port_pattern)
+        log.info(f"Subscribed: {port_pattern}")
+        
+        # 订阅 CONSOLE_SWITCH 变更（用于监听 console_feature_enabled 状态）
+        switch_pattern = f"__keyspace@{REDIS_DB}__:{SWITCH_KEY_PATTERN}"
+        await self.pubsub.psubscribe(switch_pattern)
+        log.info(f"Subscribed: {switch_pattern}")
     
     async def get_config_event(self) -> Optional[dict]:
         """获取配置变更事件（非阻塞）"""

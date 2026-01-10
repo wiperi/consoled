@@ -211,7 +211,7 @@ class DTEHeartbeat:
 
         # 关闭 pubsub
         if self._pubsub:
-            await self._pubsub.close()
+            await self._pubsub.aclose()
             self._pubsub = None
 
         # 关闭 Redis 连接
@@ -238,7 +238,7 @@ class DTEHeartbeat:
                 db=CONFIG_DB,
                 decode_responses=True
             )
-            await self._redis.ping()
+            await self._redis.ping()  # type: ignore[misc]
             log.info(f"Connected to Redis CONFIG_DB (db={CONFIG_DB})")
         except ImportError:
             log.error("redis.asyncio not available")
@@ -258,7 +258,7 @@ class DTEHeartbeat:
             return False
 
         try:
-            enabled = await self._redis.hget(CONSOLE_SWITCH_KEY, "enabled")
+            enabled = await self._redis.hget(CONSOLE_SWITCH_KEY, "enabled")  # type: ignore[misc]
             return enabled == "yes"
         except Exception as e:
             log.warning(f"Failed to check enabled status: {e}")
@@ -318,7 +318,7 @@ class DTEHeartbeat:
             log.error(f"Subscribe loop error: {e}")
         finally:
             if self._pubsub:
-                await self._pubsub.close()
+                await self._pubsub.aclose()
                 self._pubsub = None
             log.info("Subscribe loop stopped")
 
