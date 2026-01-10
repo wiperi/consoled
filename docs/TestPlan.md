@@ -37,7 +37,54 @@
 
 ## 3. 单元测试计划
 
-### 3.1 `util.py` - 工具函数测试
+### 3.1 `frame.py` - 帧协议测试 ✅
+
+**文件**: `tests/test_frame.py`
+
+| 测试类 | 测试用例 | 描述 |
+|--------|---------|------|
+| `TestCRC16` | `test_crc16_empty_data` | 测试空数据 CRC 计算 |
+| | `test_crc16_known_value` | 测试 "123456789" 的 CRC-16/MODBUS 值应为 0x4B37 |
+| | `test_crc16_single_byte` | 测试单字节数据 CRC 计算 |
+| `TestEscaping` | `test_escape_no_special_chars` | 测试不含特殊字符的数据 |
+| | `test_escape_sof` | 测试 SOF 字符转义 |
+| | `test_escape_eof` | 测试 EOF 字符转义 |
+| | `test_escape_dle` | 测试 DLE 字符转义 |
+| | `test_escape_mixed` | 测试混合数据转义 |
+| | `test_unescape_roundtrip` | 测试转义和去转义往返 |
+| | `test_unescape_no_escape` | 测试不含转义的数据 |
+| `TestFrame` | `test_create_heartbeat` | 测试创建心跳帧 |
+| | `test_build_heartbeat` | 测试构建心跳帧 |
+| | `test_build_and_parse_heartbeat` | 测试心跳帧的构建和解析 |
+| | `test_build_and_parse_with_payload` | 测试带 payload 的帧 |
+| | `test_build_and_parse_with_special_chars_in_payload` | 测试 payload 包含特殊字符 |
+| | `test_parse_invalid_buffer_too_short` | 测试解析过短的 buffer |
+| | `test_parse_invalid_crc` | 测试 CRC 错误的帧 |
+| | `test_seq_wrapping` | 测试序列号回绕 |
+| `TestFrameFilter` | `test_process_heartbeat_frame` | 测试处理心跳帧 |
+| | `test_process_user_data_only` | 测试只有用户数据（遇到 SOF 后刷新） |
+| | `test_process_user_data_with_timeout` | 测试用户数据超时刷新 |
+| | `test_process_mixed_data` | 测试混合数据流 |
+| | `test_process_multiple_frames` | 测试连续多个帧 |
+| | `test_process_frame_byte_by_byte` | 测试逐字节处理帧 |
+| | `test_flush` | 测试 flush 方法 |
+| | `test_invalid_frame_discarded` | 测试无效帧被丢弃 |
+| | `test_in_frame_property` | 测试 in_frame 属性 |
+| | `test_timeout_in_frame_discards_data` | 测试在帧内超时时丢弃数据 |
+| | `test_timeout_not_in_frame_sends_user_data` | 测试不在帧内超时时发送用户数据 |
+| | `test_sof_in_frame_discards_previous_data` | 测试在帧内收到 SOF 时丢弃之前的数据 |
+| | `test_sof_not_in_frame_sends_user_data` | 测试不在帧内收到 SOF 时发送用户数据 |
+| `TestBuildHeartbeatFrame` | `test_build_heartbeat_frame` | 测试 build_heartbeat_frame 便捷函数 |
+
+**测试覆盖功能**:
+- CRC16-MODBUS 计算
+- 特殊字符转义/去转义 (SOF, EOF, DLE)
+- Frame 类：创建、构建、解析心跳帧
+- FrameFilter 类：帧过滤、用户数据分离、超时处理
+
+---
+
+### 3.2 `util.py` - 工具函数测试
 
 **文件**: `tests/test_util.py`
 
@@ -60,7 +107,7 @@
 
 ---
 
-### 3.2 `constants.py` - 常量测试
+### 3.3 `constants.py` - 常量测试
 
 **文件**: `tests/test_constants.py`
 
@@ -73,7 +120,7 @@
 
 ---
 
-### 3.3 `db_util.py` - 数据库工具测试
+### 3.4 `db_util.py` - 数据库工具测试
 
 **文件**: `tests/test_db_util.py`
 
@@ -107,7 +154,7 @@
 
 ---
 
-### 3.4 `serial_proxy.py` - 串口代理测试
+### 3.5 `serial_proxy.py` - 串口代理测试
 
 **文件**: `tests/test_serial_proxy.py`
 
@@ -151,7 +198,7 @@
 
 ---
 
-### 3.5 `dce.py` - DCE 主服务测试
+### 3.6 `dce.py` - DCE 主服务测试
 
 **文件**: `tests/test_dce.py`
 
@@ -182,7 +229,7 @@
 
 ---
 
-### 3.6 `dte.py` - DTE 心跳服务测试
+### 3.7 `dte.py` - DTE 心跳服务测试
 
 **文件**: `tests/test_dte.py`
 
