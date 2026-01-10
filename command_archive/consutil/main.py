@@ -42,7 +42,7 @@ def show(db, brief):
 
 
     # set table header style
-    header = ["Line", "Baud", "Flow Control", "PID", "Start Time", "Device", "Oper Status", "State Duration"]
+    header = ["Line", "Baud", "Flow Control", "PID", "Start Time", "Device", "Oper State", "State Duration"]
     body = []
     for port in ports:
         # runtime information
@@ -51,9 +51,9 @@ def show(db, brief):
         date = port.session_start_date if port.session_start_date else "-"
         baud = port.baud
         flow_control = "Enabled" if port.flow_control else "Disabled"
-        oper_status = port.oper_status if port.oper_status else "-"
+        oper_state = port.oper_state if port.oper_state else "-"
         state_duration = port.state_duration if port.state_duration else "-"
-        body.append([busy+port.line_num, baud if baud else "-", flow_control, pid if pid else "-", date if date else "-", port.remote_device if port.remote_device else "-", oper_status, state_duration])
+        body.append([busy+port.line_num, baud if baud else "-", flow_control, pid if pid else "-", date if date else "-", port.remote_device if port.remote_device else "-", oper_state, state_duration])
     click.echo(tabulate(body, header, stralign='right'))
 
 # 'clear' subcommand

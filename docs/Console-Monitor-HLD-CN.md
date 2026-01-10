@@ -564,8 +564,8 @@ admin@sonic:~$ show line
 输出：
 
 ```
-  Line    Baud    Flow Control    PID    Start Time      Device    Oper Status    State Duration
-------  ------  --------------  -----  ------------  ----------  -------------  ----------------
+  Line    Baud    Flow Control    PID    Start Time      Device    Oper State    State Duration
+------  ------  --------------  -----  ------------  ----------  ------------  ----------------
      1    9600        Disabled      -             -   Terminal1             up          3d16h34s
      2    9600        Disabled      -             -   Terminal2           down              1h5m
 ```
@@ -574,7 +574,7 @@ admin@sonic:~$ show line
 
 | 列名 | 描述 |
 |------|------|
-| Oper Status | 控制台链路当前运行状态 |
+| Oper State | 控制台链路当前运行状态 |
 | State Duration | 当前状态持续时间（格式：XyXdXhXmXs，仅显示非零部分） |
 
 ---

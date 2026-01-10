@@ -150,7 +150,7 @@ class ConsolePortInfo(object):
         return self.cur_state[PID_KEY] if PID_KEY in self.cur_state else None
 
     @property
-    def oper_status(self):
+    def oper_state(self):
         return self.cur_state[OPER_STATE_KEY] if OPER_STATE_KEY in self.cur_state else None
 
     @property
