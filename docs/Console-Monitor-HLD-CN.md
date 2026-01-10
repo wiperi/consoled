@@ -369,16 +369,21 @@ def on_read_timeout():
 
 ### 3.2 DTE 侧服务
 
-#### 3.2.1 服务: `console-monitor-dte.service`
+#### 3.2.1 服务: `console-monitor-dte@.service`
 
 DTE 侧服务实现心跳发送功能，通过 Redis keyspace notification 动态响应配置变化。
 
+*   **参数获取**
+    *   TTY 名称通过 systemd 实例名（`%I`）传入
+    *   波特率从配置文件 `/run/console-monitor-dte/<tty>.conf` 读取
+    *   配置文件由 `console-monitor-dte-generator` 在启动时生成
 *   **启动流程**
-    1.  读取 `/proc/cmdline` 解析 `console=<TTYNAME>,<BAUD>` 参数
-    2.  打开物理串口（如 `/dev/ttyS0`）
-    3.  连接 Redis CONFIG_DB
-    4.  检查 `CONSOLE_SWITCH|controlled_device` 的 `enabled` 字段
-    5.  订阅 Redis keyspace notification 监听配置变化
+    1.  从命令行参数获取 TTY 名称
+    2.  从配置文件读取波特率（默认 9600）
+    3.  打开物理串口（如 `/dev/ttyS0`）
+    4.  连接 Redis CONFIG_DB
+    5.  检查 `CONSOLE_SWITCH|controlled_device` 的 `enabled` 字段
+    6.  订阅 Redis keyspace notification 监听配置变化
 *   **心跳机制**
     *   监听 CONFIG_DB 中 `CONSOLE_SWITCH|controlled_device` 的 `enabled` 字段
     *   如果为 `"yes"`，每 5 秒发送心跳帧到串口
@@ -390,9 +395,10 @@ DTE 侧服务实现心跳发送功能，通过 Redis keyspace notification 动�
 ```mermaid
 flowchart LR
   subgraph DTE["DTE (SONiC Switch)"]
-    dte_service["console-monitor-dte.service"]
+    dte_service["console-monitor-dte@.service"]
     TTY_DTE["/dev/ttyS0 (physical serial)"]
     config_db["CONFIG_DB"]
+    conf_file["/run/console-monitor-dte/*.conf"]
   end
 
   subgraph DCE["DCE (Console Server)"]
@@ -400,6 +406,7 @@ flowchart LR
   end
 
   %% DTE side: service sends heartbeat directly to serial
+  dte_service -- read baud --> conf_file
   dte_service -- check enabled --> config_db
   dte_service -- subscribe keyspace notification --> config_db
   dte_service -- heartbeat --> TTY_DTE
@@ -415,11 +422,13 @@ DTE 侧服务使用 systemd 管理，根据内核命令行参数自动配置。
 1.  **Generator 运行**
     *   `console-monitor-dte-generator` 读取 `/proc/cmdline`
     *   解析 `console=<TTYNAME>,<BAUD>` 参数
+    *   生成配置文件 `/run/console-monitor-dte/<tty>.conf`
     *   在 `/run/systemd/generator/` 下创建 wants 链接
 
 2.  **服务启动**
-    *   `console-monitor-dte.service` 被 systemd 拉起
-    *   服务读取 `/proc/cmdline` 获取串口配置
+    *   `console-monitor-dte@<tty>.service` 被 systemd 拉起
+    *   服务从命令行参数获取 TTY 名称
+    *   服务从配置文件读取波特率
     *   连接 Redis 并开始监听配置变化
 
 ```mermaid
@@ -431,21 +440,23 @@ flowchart TD
   E --> F["console-monitor-dte-generator 运行"]
   F --> G["generator 读取 /proc/cmdline"]
   G --> H["generator 发现 console=ttyS0,9600"]
-  H --> I["generator 在 /run/systemd/generator/multi-user.target.wants 下创建 wants 链接"]
-  I --> J["systemd 构建依赖图"]
-  J --> K["multi-user.target 启动"]
-  K --> L["console-monitor-dte.service 被拉起"]
-  L --> M["服务读取 /proc/cmdline"]
-  M --> N["打开 /dev/ttyS0 串口"]
-  N --> O["连接 Redis CONFIG_DB"]
-  O --> P["检查 enabled 状态"]
-  P --> Q["订阅 keyspace notification"]
-  Q --> R{"enabled=yes?"}
-  R -- yes --> S["每 5s 发送心跳帧"]
-  R -- no --> T["等待配置变更"]
-  S --> U["监听配置变更"]
-  T --> U
-  U --> R
+  H --> I["generator 生成 /run/console-monitor-dte/ttyS0.conf"]
+  I --> J["generator 创建 wants 链接"]
+  J --> K["systemd 构建依赖图"]
+  K --> L["multi-user.target 启动"]
+  L --> M["console-monitor-dte@ttyS0.service 被拉起"]
+  M --> N["服务接收参数 ttyS0"]
+  N --> O["从配置文件读取波特率"]
+  O --> P["打开 /dev/ttyS0 串口"]
+  P --> Q["连接 Redis CONFIG_DB"]
+  Q --> R["检查 enabled 状态"]
+  R --> S["订阅 keyspace notification"]
+  S --> T{"enabled=yes?"}
+  T -- yes --> U["每 5s 发送心跳帧"]
+  T -- no --> V["等待配置变更"]
+  U --> W["监听配置变更"]
+  V --> W
+  W --> T
 ```
 
 ---

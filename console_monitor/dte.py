@@ -3,21 +3,24 @@
 Console Monitor DTE (Data Terminal Equipment)
 
 DTE 侧服务：
-1. 读取 /proc/cmdline 解析 console=<TTYNAME>,<BAUD>
+1. 从命令行参数或配置文件获取 tty 和 baud
 2. 检查 CONFIG_DB 中 CONSOLE_SWITCH|controlled_device 的 enabled 字段
 3. 监听 Redis keyspace notification，动态响应 enabled 状态变化
 4. 如果 enabled=yes，每 5 秒发送心跳帧到串口
 
 放置位置: /usr/local/bin/console-monitor-dte
+用法: console-monitor-dte <tty_name> [baud]
+      或通过配置文件: /run/console-monitor-dte/<tty_name>.conf
 """
 
 import sys
 import os
-import re
+import argparse
 import asyncio
 import signal
 import logging
 from typing import Optional, Tuple
+import redis.asyncio as aioredis
 
 # 添加模块搜索路径
 sys.path.insert(0, '/usr/local/lib')
@@ -44,49 +47,91 @@ CONFIG_DB = 4
 # Redis key
 CONSOLE_SWITCH_KEY = "CONSOLE_SWITCH|controlled_device"
 
+# 默认波特率
+DEFAULT_BAUD = 9600
 
-def parse_cmdline() -> Optional[Tuple[str, int]]:
+# 配置文件目录
+CONFIG_DIR = "/run/console-monitor-dte"
+
+
+def read_config_file(tty_name: str) -> Optional[int]:
     """
-    从 /proc/cmdline 解析 console 参数
+    从配置文件读取波特率
 
-    格式: console=<TTYNAME>,<BAUD>
-    例如: console=ttyS0,9600
+    配置文件路径: /run/console-monitor-dte/<tty_name>.conf
+    格式:
+        BAUDRATE=9600
+        TTY_DEVICE=/dev/ttyS0
+
+    Args:
+        tty_name: TTY 设备名（如 ttyS0）
 
     Returns:
-        (tty_name, baud) 或 None（解析失败时）
+        波特率，或 None（读取失败时）
     """
+    conf_path = os.path.join(CONFIG_DIR, f"{tty_name}.conf")
+
+    if not os.path.exists(conf_path):
+        log.debug(f"Config file not found: {conf_path}")
+        return None
+
     try:
-        with open('/proc/cmdline', 'r') as f:
-            cmdline = f.read().strip()
-
-        log.info(f"Parsing /proc/cmdline: {cmdline}")
-
-        # 匹配 console=<ttyname>,<baud> 或 console=<ttyname>
-        # 格式可能是: console=ttyS0,9600 或 console=ttyS0,9600n8
-        pattern = r'console=([a-zA-Z0-9]+),(\d+)'
-        match = re.search(pattern, cmdline)
-
-        if match:
-            tty_name = match.group(1)
-            baud = int(match.group(2))
-            log.info(f"Parsed console: tty={tty_name}, baud={baud}")
-            return (tty_name, baud)
-
-        # 尝试匹配只有 tty 名称的情况
-        pattern_simple = r'console=([a-zA-Z0-9]+)'
-        match = re.search(pattern_simple, cmdline)
-        if match:
-            tty_name = match.group(1)
-            baud = 9600  # 默认波特率
-            log.info(f"Parsed console (default baud): tty={tty_name}, baud={baud}")
-            return (tty_name, baud)
-
-        log.warning("No console= parameter found in /proc/cmdline")
+        with open(conf_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('BAUDRATE='):
+                    baud = int(line.split('=', 1)[1])
+                    log.info(f"Read baudrate from config file: {baud}")
+                    return baud
         return None
-
     except Exception as e:
-        log.error(f"Failed to parse /proc/cmdline: {e}")
+        log.warning(f"Failed to read config file {conf_path}: {e}")
         return None
+
+
+def parse_args() -> Tuple[str, int]:
+    """
+    解析命令行参数
+
+    用法: console-monitor-dte <tty_name> [baud]
+
+    如果未指定 baud，则尝试从配置文件读取，否则使用默认值 9600
+
+    Returns:
+        (tty_name, baud)
+    """
+    parser = argparse.ArgumentParser(
+        description='Console Monitor DTE - Heartbeat Service',
+        usage='%(prog)s <tty_name> [baud]'
+    )
+    parser.add_argument(
+        'tty_name',
+        help='TTY device name (e.g., ttyS0)'
+    )
+    parser.add_argument(
+        'baud',
+        nargs='?',
+        type=int,
+        default=None,
+        help=f'Baud rate (default: from config file or {DEFAULT_BAUD})'
+    )
+
+    args = parser.parse_args()
+
+    tty_name = args.tty_name
+
+    # 确定波特率：命令行参数 > 配置文件 > 默认值
+    if args.baud is not None:
+        baud = args.baud
+        log.info(f"Using baud rate from command line: {baud}")
+    else:
+        baud = read_config_file(tty_name)
+        if baud is None:
+            baud = DEFAULT_BAUD
+            log.info(f"Using default baud rate: {baud}")
+
+    log.info(f"Configuration: tty={tty_name}, baud={baud}")
+    return (tty_name, baud)
 
 
 class DTEHeartbeat:
@@ -187,7 +232,6 @@ class DTEHeartbeat:
     async def _connect_redis(self) -> None:
         """连接 Redis CONFIG_DB"""
         try:
-            import redis.asyncio as aioredis
             self._redis = aioredis.Redis(
                 host=REDIS_HOST,
                 port=REDIS_PORT,
@@ -223,7 +267,7 @@ class DTEHeartbeat:
     async def _subscribe_loop(self) -> None:
         """监听 Redis keyspace notification"""
         try:
-            import redis.asyncio as aioredis
+
 
             # 创建新的连接用于 pubsub
             pubsub_redis = aioredis.Redis(
@@ -334,13 +378,8 @@ class DTEHeartbeat:
 
 async def async_main() -> int:
     """异步主函数"""
-    # 解析 /proc/cmdline
-    result = parse_cmdline()
-    if not result:
-        log.error("Failed to parse console configuration from /proc/cmdline")
-        return 1
-
-    tty_name, baud = result
+    # 解析命令行参数
+    tty_name, baud = parse_args()
 
     # 创建心跳服务
     service = DTEHeartbeat(tty_name, baud)
