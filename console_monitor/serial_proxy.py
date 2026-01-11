@@ -5,6 +5,7 @@
 """
 
 import os
+import time
 import asyncio
 import logging
 from typing import Optional
@@ -41,6 +42,7 @@ class SerialProxy:
         self._timeout_handle: Optional[asyncio.TimerHandle] = None
         self._heartbeat_handle: Optional[asyncio.TimerHandle] = None
         self._current_oper_state: Optional[str] = None  # 当前运行状态
+        self._last_data_activity: float = 0.0  # 最后一次串口数据活动时间
 
     async def start(self) -> bool:
         """启动代理"""
@@ -136,6 +138,9 @@ class SerialProxy:
         try:
             data = os.read(self.ser_fd, 4096)
             if data:
+                # 更新最后数据活动时间
+                self._last_data_activity = time.monotonic()
+
                 # 取消旧的超时定时器
                 if self._timeout_handle:
                     self._timeout_handle.cancel()
@@ -186,7 +191,17 @@ class SerialProxy:
         self._heartbeat_handle = None
         if not self.running:
             return
-        log.warning(f"[{self.link_id}] Heartbeat timeout")
+
+        # 检查最近是否有数据活动
+        now = time.monotonic()
+        if now - self._last_data_activity < HEARTBEAT_TIMEOUT:
+            # 有数据活动但没有心跳，重置定时器继续等待
+            log.debug(f"[{self.link_id}] Heartbeat timeout but data activity detected, resetting timer")
+            self._reset_heartbeat_timer()
+            return
+
+        # 既没有心跳也没有数据活动，判定为 down
+        log.warning(f"[{self.link_id}] Heartbeat timeout & no data activity")
         self._update_state("down")
 
     def _update_state(self, oper_state: str) -> None:
