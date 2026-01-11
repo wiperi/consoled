@@ -157,25 +157,25 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
 
 #### 3.1.2 关键假设
 
-*   用户数据流中不会出现特殊字符，0x01 (SOF), 0x1B (EOF), 0x10 (DLE)
+*   用户数据流中不会出现特殊字符，0x05 (SOF), 0x00 (EOF), 0x10 (DLE)
 *   bit error 连续在 3 个字节中出现的概率可忽略不计
 
 #### 3.1.3 特殊字符定义
 
 | 字符 | 值 (Hex) | 名称 | 描述 |
 |------|----------|------|------|
-| SOF | 0x01 | Start of Frame | 帧起始字符 |
-| EOF | 0x1B | End of Frame | 帧结束字符 |
+| SOF | 0x05 | Start of Frame | 帧起始字符 |
+| EOF | 0x00 | End of Frame | 帧结束字符 |
 | DLE | 0x10 | Data Link Escape | 转义字符 |
 
 **定界符选择说明：**
 
-*   **SOF (0x01)**
-    *   ASCII SOH (Start of Heading)
+*   **SOF (0x05)**
+    *   ASCII ENQ (Enquiry)
     *   不可打印字符，正常终端输出中极少出现
-*   **EOF (0x1B)**
-    *   ASCII ESC
-    *   虽然在终端控制序列中常见，但通过转义机制处理
+*   **EOF (0x00)**
+    *   ASCII NUL
+    *   空字符，正常终端输出中极少出现
 *   **DLE (0x10)**
     *   ASCII DLE (Data Link Escape)
     *   用于转义帧内容中的特殊字符
@@ -183,11 +183,11 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
 **同步序列设计：**
 
 *   **帧头同步序列**
-    *   3 个连续的 SOF 字符：0x01 0x01 0x01
+    *   3 个连续的 SOF 字符：0x05 0x05 0x05
     *   收到任何一个SOF都会起到状态转换的作用，而不是收到连续的三个SOF才会触发状态转换
     *   单个 SOF 发生 bit error 不会导致帧同步丢失
 *   **帧尾同步序列**
-    *   3 个连续的 EOF 字符：0x1B 0x1B 0x1B
+    *   3 个连续的 EOF 字符：0x00 0x00 0x00
     *   同样，收到任何一个EOF字符都会触发状态转换
     *   同样提供 bit error 容错能力
 
@@ -197,8 +197,8 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
 
 | 原始字节 | 转义后 |
 |----------|--------|
-| 0x01 (SOF) | 0x10 0x01 |
-| 0x1B (EOF) | 0x10 0x1B |
+| 0x05 (SOF) | 0x10 0x05 |
+| 0x00 (EOF) | 0x10 0x00 |
 | 0x10 (DLE) | 0x10 0x10 |
 
 **转义处理说明：**
@@ -226,7 +226,7 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
 
 | 字段 | 大小 | 描述 |
 |------|------|------|
-| SOF x 3 | 3 字节 | 帧头同步序列，0x01 0x01 0x01 |
+| SOF x 3 | 3 字节 | 帧头同步序列，0x05 0x05 0x05 |
 | Version | 1 字节 | 协议版本，当前为 0x01 |
 | Seq | 1 字节 | 序列号，0x00-0xFF 循环递增 |
 | Flag | 1 字节 | 标志位，保留字段，当前为 0x00 |
@@ -234,7 +234,7 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
 | Length | 1 字节 | Payload 长度（0-255，原始长度） |
 | Payload | N 字节 | 可选数据载荷 |
 | CRC16 | 2 字节 | 校验和，大端序（高字节在前） |
-| EOF x 3 | 3 字节 | 帧尾同步序列，0x1B 0x1B 0x1B |
+| EOF x 3 | 3 字节 | 帧尾同步序列，0x00 0x00 0x00 |
 
 **帧长度限制：**
 
@@ -268,7 +268,7 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
 
 #### 3.1.7 心跳帧示例
 ```
-01 01 01 01 00 00 01 00 XX XX 1B 1B 1B
+05 05 05 01 00 00 01 00 XX XX 00 00 00
 └──┬──┘ │  │  │  │  │  └──┬─┘ └──┬──┘
    │    │  │  │  │  │     │      └── EOF x 3 (帧尾同步序列)
    │    │  │  │  │  │     └── CRC16 (计算值)

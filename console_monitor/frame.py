@@ -12,13 +12,13 @@ Frame Protocol Implementation
 +----------+--------+-----+------+------+--------+---------+-------+----------+
 
 特殊字符:
-- SOF (0x01): 帧起始符
-- EOF (0x1B): 帧结束符
+- SOF (0x05): 帧起始符
+- EOF (0x00): 帧结束符
 - DLE (0x10): 转义字符
 
 转义规则 (帧内容中):
-- 0x01 -> 0x10 0x01
-- 0x1B -> 0x10 0x1B
+- 0x05 -> 0x10 0x05
+- 0x00 -> 0x10 0x00
 - 0x10 -> 0x10 0x10
 """
 
@@ -34,8 +34,8 @@ from typing import Optional, Callable
 
 class SpecialChar(IntEnum):
     """特殊字符定义"""
-    SOF = 0x01  # Start of Frame
-    EOF = 0x1B  # End of Frame
+    SOF = 0x05  # Start of Frame
+    EOF = 0x00  # End of Frame
     DLE = 0x10  # Data Link Escape
 
 
@@ -95,8 +95,8 @@ def escape_data(data: bytes) -> bytes:
     """
     对数据进行转义
     
-    0x01 (SOF) -> 0x10 0x01
-    0x1B (EOF) -> 0x10 0x1B
+    0x05 (SOF) -> 0x10 0x05
+    0x00 (EOF) -> 0x10 0x00
     0x10 (DLE) -> 0x10 0x10
     """
     result = bytearray()
