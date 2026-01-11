@@ -5,6 +5,8 @@ Console Proxy Service
 监听 Redis 配置，为每个串口创建过滤代理。
 """
 
+import os
+import argparse
 import asyncio
 import signal
 import logging
@@ -162,6 +164,15 @@ async def main() -> None:
 
 def run():
     """Entry point for the console-monitor daemon"""
+    parser = argparse.ArgumentParser(description='Console Monitor DCE Service')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Enable verbose output (binary data logging)')
+    args = parser.parse_args()
+    
+    # 如果启用verbose，设置环境变量
+    if args.verbose:
+        os.environ['CONSOLE_MONITOR_VERBOSE'] = 'True'
+    
     asyncio.run(main())
 
 

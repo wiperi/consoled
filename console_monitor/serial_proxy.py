@@ -141,6 +141,9 @@ class SerialProxy:
         try:
             data = os.read(self.ser_fd, 4096)
             if data:
+                # 输出接收到的二进制数据（Serial→Filter）
+                self._log_binary_data(data, "Serial→Filter")
+                
                 # 更新最后数据活动时间
                 self._last_data_activity = time.monotonic()
 
@@ -176,6 +179,8 @@ class SerialProxy:
         """用户数据回调：收到非帧数据时转发到 PTY"""
         if self.pty_master >= 0:
             try:
+                # 输出转发的用户数据（Filter→PTY）
+                self._log_binary_data(data, "Filter→PTY")
                 os.write(self.pty_master, data)
             except OSError:
                 pass
@@ -230,6 +235,8 @@ class SerialProxy:
         try:
             data = os.read(self.pty_master, 4096)
             if data:
+                # 输出发送到串口的二进制数据（PTY→Serial）
+                self._log_binary_data(data, "PTY→Serial")
                 os.write(self.ser_fd, data)
         except (BlockingIOError, OSError):
             pass
@@ -257,6 +264,31 @@ class SerialProxy:
             except Exception as e:
                 log.error(f"[{self.link_id}] Failed to remove symlink: {e}")
             self.pty_symlink = ""
+
+    def _log_binary_data(self, data: bytes, direction: str) -> None:
+        """
+        以二进制和可读形式输出数据到终端
+        
+        Args:
+            data: 要输出的字节数据
+            direction: 数据流向（如 "Serial→PTY", "PTY→Serial"）
+        """
+        # 检查环境变量是否启用verbose输出
+        if os.environ.get('CONSOLE_MONITOR_VERBOSE', 'False') != 'True':
+            return
+            
+        hex_str = data.hex(' ', 1)  # 每字节用空格分隔
+        # 将不可打印字符替换为 <HEX>
+        readable = ''.join(chr(b) if 32 <= b < 127 else f"<0x{b:02x}>" for b in data)
+        log.info(f"[{self.link_id}] {direction} ({len(data)} bytes):\n  HEX: {hex_str}\n  ASCII: {readable}\n")
+        
+        # 检查是否包含特殊字节 0x00, 0x05, 0x10
+        special_bytes = {0x00, 0x05, 0x10}
+        found_special = [f"0x{b:02x}" for b in data if b in special_bytes]
+        if found_special:
+            log.error(f"[{self.link_id}] {direction} contains special bytes: {', '.join(found_special)}")
+            import sys
+            sys.exit(1)
 
     @staticmethod
     def _calculate_filter_timeout(baud: int, multiplier: int = 3) -> float:
