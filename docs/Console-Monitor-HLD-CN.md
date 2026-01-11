@@ -298,51 +298,56 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
 
 **检测算法：**
 
-```python
-# 状态变量
-in_frame = False  # 是否在帧内
+```txt
+PROCEDURE PROCESS(F, data)
+    // F is a frame-filter object with fields:
+    //   F.buffer        : sequence of bytes
+    //   F.in_frame      : boolean
+    //   F.escape_next   : boolean
+    // And helper procedures:
+    //   FLUSH_AS_USER_DATA(F)
+    //   DISCARD_BUFFER(F)
+    //   TRY_PARSE_FRAME(F)
+    //   FLUSH_BUFFER(F)
 
-def process_bytes(data: bytes) -> bytes:
+    FOR each byte b in data DO
+        IF F.escape_next = TRUE THEN
+            // previous byte was DLE; treat b as normal data
+            APPEND(F.buffer, b)
+            F.escape_next ← FALSE
 
-    for b in data:
+            IF LENGTH(F.buffer) ≥ MAX_FRAME_BUFFER_SIZE THEN
+                FLUSH_BUFFER(F)
+            END IF
 
-        if b == SOF:
-            if not in_frame:
-                # 不在帧内，当前 buffer 是用户数据
-                send_to_user(buffer)
-            # else: 在帧内收到 SOF，说明之前的帧不完整，丢弃
-            buffer.clear()
-            pos = 0
-            in_frame = True  # 进入帧内状态
-        
-        elif b == EOF:
-            parse_frame(buffer)
-            buffer.clear()
-            pos = 0
-            in_frame = False  # 退出帧内状态
+        ELSE IF b = DLE THEN
+            // mark next byte as escaped (but keep DLE in buffer)
+            APPEND(F.buffer, b)
+            F.escape_next ← TRUE
 
-        else:
-            buffer.append(b)
-            pos += 1
+        ELSE IF b = SOF THEN
+            IF F.in_frame = FALSE THEN
+                // bytes before SOF are user data
+                FLUSH_AS_USER_DATA(F)
+            ELSE
+                // SOF inside a frame => previous frame incomplete; discard
+                DISCARD_BUFFER(F)
+            END IF
+            F.in_frame ← TRUE
 
-        if pos >= MAX_FRAME_SIZE:
-            if not in_frame:
-                send_to_user(buffer)
-            # else: 在帧内溢出，帧无效，丢弃
-            buffer.clear()
-            pos = 0
-            in_frame = False
+        ELSE IF b = EOF THEN
+            TRY_PARSE_FRAME(F)
+            F.in_frame ← FALSE
 
-# 0.5s 内没有读取到任何数据
-def on_read_timeout():
-    if buffer:
-        if not in_frame:
-            # 不在帧内，buffer 是用户数据
-            send_to_user(buffer)
-        # else: 在帧内超时，帧不完整，丢弃
-        buffer.clear()
-        pos = 0
-        in_frame = False
+        ELSE
+            APPEND(F.buffer, b)
+
+            IF LENGTH(F.buffer) ≥ MAX_FRAME_BUFFER_SIZE THEN
+                FLUSH_BUFFER(F)
+            END IF
+        END IF
+    END FOR
+END PROCEDURE
 
 ```
 
