@@ -23,6 +23,7 @@ Frame Protocol Implementation
 """
 
 from dataclasses import dataclass
+from datetime import date
 from enum import IntEnum
 from typing import Optional, Callable
 
@@ -36,6 +37,10 @@ class SpecialChar(IntEnum):
     SOF = 0x01  # Start of Frame
     EOF = 0x1B  # End of Frame
     DLE = 0x10  # Data Link Escape
+
+
+# 可转义字符集合: DLE 后跟这些字符构成有效的转义序列
+ESCAPABLE_CHARS = frozenset({SpecialChar.SOF, SpecialChar.EOF, SpecialChar.DLE})
 
 
 class FrameType(IntEnum):
@@ -96,7 +101,7 @@ def escape_data(data: bytes) -> bytes:
     """
     result = bytearray()
     for byte in data:
-        if byte in (SpecialChar.SOF, SpecialChar.EOF, SpecialChar.DLE):
+        if byte in ESCAPABLE_CHARS:
             result.append(SpecialChar.DLE)
         result.append(byte)
     return bytes(result)
@@ -113,10 +118,12 @@ def unescape_data(data: bytes) -> bytes:
     result = bytearray()
     i = 0
     while i < len(data):
-        if data[i] == SpecialChar.DLE and i + 1 < len(data):
+        if data[i] == SpecialChar.DLE and i + 1 < len(data) and data[i + 1] in ESCAPABLE_CHARS:
+            # 有效转义序列，跳过 DLE，保留转义字符
             result.append(data[i + 1])
             i += 2
         else:
+            # 非转义序列，保留原字节
             result.append(data[i])
             i += 1
     return bytes(result)
@@ -314,8 +321,8 @@ class FrameFilter:
             data: 输入的字节数据
         """
         for byte in data:
-            # 如果上一个字节是 DLE，当前字节作为普通数据处理
             if self._escape_next:
+                # 如果上一个字节是 DLE，当前字节作为普通数据处理
                 self._buffer.append(byte)
                 self._escape_next = False
                 # 溢出保护
