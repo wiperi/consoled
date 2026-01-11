@@ -10,10 +10,10 @@ import asyncio
 import logging
 from typing import Optional
 
-from .frame import Frame, FrameFilter
+from .frame import Frame, FrameFilter, MAX_FRAME_BUFFER_SIZE
 from .db_util import DbUtil
 from .util import set_nonblocking, configure_serial, configure_pty
-from .constants import FILTER_TIMEOUT, HEARTBEAT_TIMEOUT
+from .constants import HEARTBEAT_TIMEOUT
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +39,9 @@ class SerialProxy:
         self.pty_symlink: str = ""
         self.filter: Optional[FrameFilter] = None
         self.running: bool = False
+        
+        # 根据波特率计算帧过滤超时时间
+        self.filter_timeout: float = self._calculate_filter_timeout(baud)
         self._timeout_handle: Optional[asyncio.TimerHandle] = None
         self._heartbeat_handle: Optional[asyncio.TimerHandle] = None
         self._current_oper_state: Optional[str] = None  # 当前运行状态
@@ -152,7 +155,7 @@ class SerialProxy:
                 # 如果 buffer 非空，设置新的超时定时器
                 if self.filter.has_pending_data():
                     self._timeout_handle = self.loop.call_later(
-                        FILTER_TIMEOUT,
+                        self.filter_timeout,
                         self._on_timeout
                     )
         except (BlockingIOError, OSError):
@@ -254,3 +257,21 @@ class SerialProxy:
             except Exception as e:
                 log.error(f"[{self.link_id}] Failed to remove symlink: {e}")
             self.pty_symlink = ""
+
+    @staticmethod
+    def _calculate_filter_timeout(baud: int, multiplier: int = 3) -> float:
+        """
+        根据波特率计算帧过滤超时时间
+        
+        公式：超时 = 每字符时间 × 最大帧长度 × 倍数余量
+        每字符时间 = 10 bits / 波特率（1 start + 8 data + 1 stop）
+        
+        Args:
+            baud: 波特率
+            multiplier: 超时倍数余量
+        
+        Returns:
+            超时时间（秒）
+        """
+        char_time = 10.0 / baud
+        return char_time * MAX_FRAME_BUFFER_SIZE * multiplier

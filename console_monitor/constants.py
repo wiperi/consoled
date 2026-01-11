@@ -15,7 +15,6 @@ KEY_PATTERN = "CONSOLE_PORT|*"
 SWITCH_KEY_PATTERN = "CONSOLE_SWITCH|*"
 
 # 超时配置
-FILTER_TIMEOUT = 0.5       # 帧过滤超时（秒）
 HEARTBEAT_TIMEOUT = 15.0   # 心跳超时（秒）
 
 # 波特率映射
