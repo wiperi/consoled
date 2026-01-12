@@ -2,7 +2,11 @@
 
 ## High Level Design Document
 
-### Revision 1.0
+### Revision
+
+|  Rev  |   Date      |   Author   | Change Description |
+| :---: | :---------: | :--------: | ------------------ |
+|  0.1  | 12 Jan 2026 | Cliff Chen | Initial version    |
 
 ---
 
@@ -11,7 +15,6 @@
 - [术语与缩写](#术语与缩写)
 - [1. 功能概述](#1-功能概述)
   - [1.1 功能需求](#11-功能需求)
-  - [1.2 设计目标](#12-设计目标)
 - [2. 设计概述](#2-设计概述)
   - [2.1 架构](#21-架构)
   - [2.2 DTE 侧](#22-dte-侧)
@@ -19,7 +22,7 @@
 - [3. 详细设计](#3-详细设计)
   - [3.1 帧结构设计](#31-帧结构设计)
   - [3.2 DTE 侧服务](#32-dte-侧服务)
-  - [3.3 DCE 侧 Console Monitor DCE 服务](#33-dce-侧-console-monitor-dce-服务)
+  - [3.3 DCE 侧服务](#33-dce-侧服务)
 - [4. 数据库更改](#4-数据库更改)
 - [5. CLI](#5-cli)
 - [6. 流程图](#6-流程图)
@@ -43,26 +46,17 @@
 
 ## 1. 功能概述
 
-在数据中心网络中，Console Server（DCE）通过串口直连多台 SONiC Switch（DTE），用于故障时的带外管理与控制台接入。consoled 服务提供链路 Oper 状态探测功能。
+在数据中心网络中，Console Server（DCE）通过串口直连多台 SONiC Switch（DTE），用于故障时的带外管理与控制台接入。控制台链路作为设备紧急救火场景中的最后一道防线，若链路故障未能及时发现，将大幅增加故障排查难度和时间成本。consoled 服务通过提供链路 Oper 状态的实时自动探测功能,为串口连接赋予可观测性,使运维团队能够即时监控链路健康状态。在故障处理时提供关键支撑,提升救火效率,缩短业务中断时间。
+
 
 ### 1.1 功能需求
 
-*   **连通性检测（Heartbeat）**
+*   **连通性检测**
     *   判断 DCE ↔ DTE 串口链路是否可用（Oper Up/Down）
 *   **非侵入式（Non-Interference）**
     *   不影响正常 Console 运维，包括远程设备冷重启和系统重装
-*   **高可用与持久化（HA & Persistence）**
-    *   进程/系统重启后可恢复状态
-    *   对端重启后可自动恢复探测
-
-### 1.2 设计目标
-
-| 目标 | 描述 |
-|------|------|
-| 可靠性 | 准确的链路状态检测，最小化误报/漏报 |
-| 非侵入 | 对正常控制台操作零影响 |
-| 低开销 | 最小化资源消耗和用户侧延迟 |
-| 自动恢复 | 任意一侧重启后自动恢复 |
+*   **健壮性**
+    *   设备重启后可自动恢复探测
 
 ---
 
@@ -101,18 +95,16 @@ flowchart LR
   picocom <-- interactive session --> pty_slave_dce
 ```
 
-设计核心：
-- DTE 侧：服务直接向串口发送心跳帧，通过 Redis keyspace notification 动态响应配置变化
-- DCE 侧：将"用户 ↔ 串口"访问模式转变为"用户 ↔ PTY ↔ Proxy ↔ 串口"模式
-- DCE 侧 Proxy 独占物理串口，通过 PTY 与上层应用交互
+### 关键决策
+
+*   DCE侧无法确定DTE设备的初始状态（rebooting or normal），因此DCE无法主动向DTE发送探测数据，否则可能干扰bootloader
 
 ### 2.2 DTE 侧
 
-DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动态响应配置变化。
+DTE 侧通过 Redis keyspace notification 动态响应配置变化。在功能enabled的状态下，定期发送心跳帧以验证链路连通性。
 
 *   **直接串口访问**
     *   服务直接打开物理串口（如 `/dev/ttyS0`）用于发送心跳
-    *   不创建 PTY 对，不影响系统原有的 console 访问方式
 *   **心跳机制**
     *   启动时检查 CONFIG_DB 中 `CONSOLE_SWITCH|controlled_device` 的 `enabled` 字段
     *   监听 Redis keyspace notification，动态响应 enabled 状态变化
@@ -144,23 +136,88 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
 
 ### 3.1 帧结构设计
 
-#### 3.1.1 设计原则
+#### 3.1.1 帧格式
+
+```
++----------+--------+-----+------+------+--------+---------+-------+----------+
+| SOF x 3  | Version| Seq | Flag | Type | Length | Payload | CRC16 | EOF x 3  |
++----------+--------+-----+------+------+--------+---------+-------+----------+
+|    3B    |   1B   | 1B  |  1B  |  1B  |   1B   |   N B   |  2B   |    3B    |
++----------+--------+-----+------+------+--------+---------+-------+----------+
+```
+
+| 字段 | 大小 | 描述 |
+|------|------|------|
+| SOF x 3 | 3 字节 | 帧头同步序列，0x05 0x05 0x05 |
+| Version | 1 字节 | 协议版本，当前为 0x01 |
+| Seq | 1 字节 | 序列号，0x00-0xFF 循环递增 |
+| Flag | 1 字节 | 标志位，保留字段，当前为 0x00 |
+| Type | 1 字节 | 帧类型 |
+| Length | 1 字节 | Payload 长度 (值 <= 24) |
+| Payload | N 字节 | 可选数据载荷 |
+| CRC16 | 2 字节 | 校验和，大端序（高字节在前） |
+| EOF x 3 | 3 字节 | 帧尾同步序列，0x00 0x00 0x00 |
+
+**帧长度限制：**
+
+*   **最大帧长度**
+    *   去掉帧头帧尾后，不超过 64 字节
+    *   Length的值 <= 24
+    *   帧长度 <= buffer 长度确保从帧中间开始读取时能恢复对齐
+*   **Buffer 大小**
+    *   64 字节，可根据需求调整
+
+**CRC16 计算：**
+
+*   **算法**
+    *   CRC-16/MODBUS
+*   **计算范围**
+    *   从 Version 到 Payload（不包含转义字符，使用原始数据）
+    *   不包括帧头、CRC16 本身、帧尾
+*   **字节序**
+    *   大端序（高字节在前，低字节在后）
+
+#### 3.1.2 帧类型定义
+
+| Type | 值 (Hex) | 描述 |
+|------|----------|------|
+| HEARTBEAT | 0x01 | 心跳帧 |
+| 保留 | 0x02-0xFF | 未来扩展 |
+
+#### FLAG字段定义
+
+标志位保留，当前默认为0x00
+
+#### 3.1.3 心跳帧示例
+```
+05 05 05 01 00 00 01 00 XX XX 00 00 00
+└──┬──┘ │  │  │  │  │  └──┬─┘ └──┬──┘
+   │    │  │  │  │  │     │      └── EOF x 3 (帧尾同步序列)
+   │    │  │  │  │  │     └── CRC16 (计算值)
+   │    │  │  │  │  └──────── Length: 0 (无 payload)
+   │    │  │  │  └─────────── Type: HEARTBEAT (0x01)
+   │    │  │  └────────────── Flag: 0x00
+   │    │  └───────────────── Seq: 0x00 (序列号)
+   │    └──────────────────── Version: 0x01
+   └───────────────────────── SOF x 3 (帧头同步序列)
+```
+
+#### 3.1.4 设计决策
 
 *   **可靠检测**
-    *   可从任意字节流中区分心跳帧
-    *   支持从帧中间开始读取时恢复对齐
+    *   使用SOF，EOF，支持从帧中间开始读取时恢复对齐
+    *   使用特殊控制字符作为帧定界符，限制帧的最大长度，引入sliding buffer，以支持从任意字节流中区分心跳帧
 *   **容错性**
-    *   使用 3 字节同步序列作为帧定界符
-    *   单个字节的 bit error 不会导致帧同步丢失
+    *   为了避免单个字节的 bit error 不会导致帧同步丢失，使用 3 个重复的帧定界符作为同步序列
 *   **透明传输**
-    *   转义机制确保帧内容可包含任意字节
+    *   转义机制确保帧内容可使用任意字节
 
-#### 3.1.2 关键假设
+#### 3.1.5 关键假设
 
 *   用户数据流中不会出现特殊字符，0x05 (SOF), 0x00 (EOF), 0x10 (DLE)
 *   bit error 连续在 3 个字节中出现的概率可忽略不计
 
-#### 3.1.3 特殊字符定义
+#### 3.1.6 特殊字符定义
 
 | 字符 | 值 (Hex) | 名称 | 描述 |
 |------|----------|------|------|
@@ -168,17 +225,20 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
 | EOF | 0x00 | End of Frame | 帧结束字符 |
 | DLE | 0x10 | Data Link Escape | 转义字符 |
 
-**定界符选择说明：**
+**定界符 ASCII 定义：**
 
 *   **SOF (0x05)**
     *   ASCII ENQ (Enquiry)
-    *   不可打印字符，正常终端输出中极少出现
+    *   不可打印控制字符，现代终端和 shell 不解释此字符
+    *   历史上用于轮询通信（主站询问从站是否就绪），现代系统已不使用
 *   **EOF (0x00)**
-    *   ASCII NUL
-    *   空字符，正常终端输出中极少出现
+    *   ASCII NUL (Null)
+    *   空字符，终端通常直接忽略
+    *   C 语言字符串终止符，不会出现在正常文本输出中
 *   **DLE (0x10)**
     *   ASCII DLE (Data Link Escape)
-    *   用于转义帧内容中的特殊字符
+    *   不可打印控制字符，专为数据链路层转义设计
+    *   符合其历史语义，用于标记后续字符需要特殊处理
 
 **同步序列设计：**
 
@@ -191,7 +251,7 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
     *   同样，收到任何一个EOF字符都会触发状态转换
     *   同样提供 bit error 容错能力
 
-#### 3.1.4 转义规则
+#### 3.1.7 转义规则
 
 当帧内容（帧头和帧尾之间）包含特殊字符时，需要进行转义：
 
@@ -214,87 +274,15 @@ DTE 侧直接向串口发送心跳帧，通过 Redis keyspace notification 动�
     *   然后进行 CRC16 校验
     *   校验通过后提取各字段数据
 
-#### 3.1.5 帧格式
-
-```
-+----------+--------+-----+------+------+--------+---------+-------+----------+
-| SOF x 3  | Version| Seq | Flag | Type | Length | Payload | CRC16 | EOF x 3  |
-+----------+--------+-----+------+------+--------+---------+-------+----------+
-|    3B    |   1B   | 1B  |  1B  |  1B  |   1B   |   N B   |  2B   |    3B    |
-+----------+--------+-----+------+------+--------+---------+-------+----------+
-```
-
-| 字段 | 大小 | 描述 |
-|------|------|------|
-| SOF x 3 | 3 字节 | 帧头同步序列，0x05 0x05 0x05 |
-| Version | 1 字节 | 协议版本，当前为 0x01 |
-| Seq | 1 字节 | 序列号，0x00-0xFF 循环递增 |
-| Flag | 1 字节 | 标志位，保留字段，当前为 0x00 |
-| Type | 1 字节 | 帧类型 |
-| Length | 1 字节 | Payload 长度（0-255，原始长度） |
-| Payload | N 字节 | 可选数据载荷 |
-| CRC16 | 2 字节 | 校验和，大端序（高字节在前） |
-| EOF x 3 | 3 字节 | 帧尾同步序列，0x00 0x00 0x00 |
-
-**帧长度限制：**
-
-*   **最大帧长度**
-    *   去掉帧头帧尾后，不超过 64 字节
-    *   Length的值 <= 24
-    *   帧长度 <= buffer 长度确保从帧中间开始读取时能恢复对齐
-*   **Buffer 大小**
-    *   64 字节，可根据需求调整
-
-**CRC16 计算：**
-
-*   **算法**
-    *   CRC-16/MODBUS（多项式 0x8005，初始值 0xFFFF，反射输入/输出）
-*   **计算范围**
-    *   从 Version 到 Payload（不包含转义字符，使用原始数据）
-    *   不包括帧头、CRC16 本身、帧尾
-*   **字节序**
-    *   大端序（高字节在前，低字节在后）
-
-#### 3.1.6 帧类型定义
-
-| Type | 值 (Hex) | 描述 |
-|------|----------|------|
-| HEARTBEAT | 0x01 | 心跳帧 |
-| 保留 | 0x02-0xFF | 未来扩展 |
-
-#### FLAG字段定义
-
-标志位保留，当前默认为0x00
-
-#### 3.1.7 心跳帧示例
-```
-05 05 05 01 00 00 01 00 XX XX 00 00 00
-└──┬──┘ │  │  │  │  │  └──┬─┘ └──┬──┘
-   │    │  │  │  │  │     │      └── EOF x 3 (帧尾同步序列)
-   │    │  │  │  │  │     └── CRC16 (计算值)
-   │    │  │  │  │  └──────── Length: 0 (无 payload)
-   │    │  │  │  └─────────── Type: HEARTBEAT (0x01)
-   │    │  │  └────────────── Flag: 0x00
-   │    │  └───────────────── Seq: 0x00 (序列号)
-   │    └──────────────────── Version: 0x01
-   └───────────────────────── SOF x 3 (帧头同步序列)
-```
-
----
-
-#### 3.3.3 帧检测与过滤
+#### 3.1.8 帧检测与过滤
 
 **Buffer 设计：**
 
-*   **Buffer**
-    *   固定大小 64 字节
-    *   存储除了SOF，EOF以外的所有数据
-*   **设计原则**
-    *   帧头、帧尾不入 buffer
-    *   帧内容（包括 DLE 和被转义字符）全部入 buffer
-    *   CRC16 校验使用 buffer 中的数据
-    *   校验通过后再去转义提取原始数据
+由于帧可能在被read时被拆分，需要引入一个 sliding buffer 来存储接收到的字节流以进行帧检测。
 
+*   **特点：**
+    *   固定大小 64 字节
+    *   存储除了SOF，EOF以外的所有输入数据
 
 **检测算法：**
 
@@ -351,46 +339,33 @@ END PROCEDURE
 
 ```
 
-**帧处理流程：**
+**超时处理**
 
-算法说明：
-*   **状态跟踪**: 使用 `in_frame` 变量跟踪当前是否在帧内（SOF 和 EOF 之间）
-*   收到SOF（帧起始符）时：
-    *   如果不在帧内：将当前缓冲区内容作为普通数据发送给用户
-    *   如果在帧内：说明之前的帧不完整，丢弃缓冲区内容
-    *   进入帧内状态
-*   收到EOF（帧结束符）时：解析缓冲区中的帧数据，退出帧内状态
-*   收到其他字节时：将字节添加到缓冲区
-*   缓冲区溢出保护：
-    *   如果不在帧内：将内容作为普通数据发送给用户
-    *   如果在帧内：帧无效，丢弃缓冲区内容
-    *   退出帧内状态
-*   **超时处理**: 当超时时间内没有新数据时，将缓冲区作为用户数据发送或丢弃
-    *   超时时间根据波特率动态计算：`timeout = (10 / baud) × MAX_FRAME_BUFFER_SIZE × 3`
-    *   公式说明：每字符时间（10 bits / 波特率）× 最大帧长度 × 3倍余量
-    *   如果不在帧内：将缓冲区作为用户数据发送
-    *   如果在帧内：帧不完整，丢弃缓冲区内容
-    *   退出帧内状态
+当超时时间内没有新数据时，根据`in_frame`状态，将缓冲区作为用户数据发送或丢弃
+*   超时时间根据波特率动态计算：`timeout = (10 / baud) × MAX_FRAME_BUFFER_SIZE × 3`
+*   公式说明：每字符时间（10 bits / 波特率）× 最大帧长度 × 3倍余量
+*   如果不在帧内：将缓冲区作为用户数据发送
+*   如果在帧内：帧不完整，丢弃缓冲区内容
+*   退出帧内状态
 
 ---
 
 ### 3.2 DTE 侧服务
 
-#### 3.2.1 服务: `console-monitor-dte@.service`
+#### 3.2.1 服务: `console-monitor-dte.service`
 
 DTE 侧服务实现心跳发送功能，通过 Redis keyspace notification 动态响应配置变化。
 
 *   **参数获取**
-    *   TTY 名称通过 systemd 实例名（`%I`）传入
-    *   波特率从配置文件 `/run/console-monitor-dte/<tty>.conf` 读取
-    *   配置文件由 `console-monitor-dte-generator` 在启动时生成
+    *   服务启动时直接读取 `/proc/cmdline`
+    *   解析 `console=<TTYNAME>,<BAUD>` 参数获取 TTY 名称和波特率
+    *   如果未指定波特率，默认使用 9600
 *   **启动流程**
-    1.  从命令行参数获取 TTY 名称
-    2.  从配置文件读取波特率（默认 9600）
-    3.  打开物理串口（如 `/dev/ttyS0`）
-    4.  连接 Redis CONFIG_DB
-    5.  检查 `CONSOLE_SWITCH|controlled_device` 的 `enabled` 字段
-    6.  订阅 Redis keyspace notification 监听配置变化
+    1.  读取 `/proc/cmdline` 解析串口配置
+    2.  打开物理串口（如 `/dev/ttyS0`）
+    3.  连接 Redis CONFIG_DB
+    4.  检查 `CONSOLE_SWITCH|controlled_device` 的 `enabled` 字段
+    5.  订阅 Redis keyspace notification 监听配置变化
 *   **心跳机制**
     *   监听 CONFIG_DB 中 `CONSOLE_SWITCH|controlled_device` 的 `enabled` 字段
     *   如果为 `"yes"`，每 5 秒发送心跳帧到串口
@@ -402,10 +377,10 @@ DTE 侧服务实现心跳发送功能，通过 Redis keyspace notification 动�
 ```mermaid
 flowchart LR
   subgraph DTE["DTE (SONiC Switch)"]
-    dte_service["console-monitor-dte@.service"]
+    dte_service["console-monitor-dte.service"]
     TTY_DTE["/dev/ttyS0 (physical serial)"]
     config_db["CONFIG_DB"]
-    conf_file["/run/console-monitor-dte/*.conf"]
+    cmdline["/proc/cmdline"]
   end
 
   subgraph DCE["DCE (Console Server)"]
@@ -413,7 +388,7 @@ flowchart LR
   end
 
   %% DTE side: service sends heartbeat directly to serial
-  dte_service -- read baud --> conf_file
+  dte_service -- read tty & baud --> cmdline
   dte_service -- check enabled --> config_db
   dte_service -- subscribe keyspace notification --> config_db
   dte_service -- heartbeat --> TTY_DTE
@@ -424,46 +399,34 @@ flowchart LR
 
 #### 3.2.3 服务启动与管理
 
-DTE 侧服务使用 systemd 管理，根据内核命令行参数自动配置。
+DTE 侧服务使用 systemd 管理，服务启动时从内核命令行读取串口配置。
 
-1.  **Generator 运行**
-    *   `console-monitor-dte-generator` 读取 `/proc/cmdline`
-    *   解析 `console=<TTYNAME>,<BAUD>` 参数
-    *   生成配置文件 `/run/console-monitor-dte/<tty>.conf`
-    *   在 `/run/systemd/generator/` 下创建 wants 链接
-
-2.  **服务启动**
-    *   `console-monitor-dte@<tty>.service` 被 systemd 拉起
-    *   服务从命令行参数获取 TTY 名称
-    *   服务从配置文件读取波特率
-    *   连接 Redis 并开始监听配置变化
+1.  **服务启动**
+    *   `console-monitor-dte.service` 在 `multi-user.target` 后启动
+    *   服务读取 `/proc/cmdline` 解析 `console=<TTYNAME>,<BAUD>` 参数
+    *   打开对应串口并连接 Redis
+    *   开始监听配置变化
 
 ```mermaid
 flowchart TD
   A["Bootloader 启动 Linux 内核"] --> B["内核解析命令行"]
   B --> C["/proc/cmdline 可用"]
   C --> D["systemd (PID 1) 启动"]
-  D --> E["systemd 加载单元并运行 generators"]
-  E --> F["console-monitor-dte-generator 运行"]
-  F --> G["generator 读取 /proc/cmdline"]
-  G --> H["generator 发现 console=ttyS0,9600"]
-  H --> I["generator 生成 /run/console-monitor-dte/ttyS0.conf"]
-  I --> J["generator 创建 wants 链接"]
-  J --> K["systemd 构建依赖图"]
-  K --> L["multi-user.target 启动"]
-  L --> M["console-monitor-dte@ttyS0.service 被拉起"]
-  M --> N["服务接收参数 ttyS0"]
-  N --> O["从配置文件读取波特率"]
-  O --> P["打开 /dev/ttyS0 串口"]
-  P --> Q["连接 Redis CONFIG_DB"]
-  Q --> R["检查 enabled 状态"]
-  R --> S["订阅 keyspace notification"]
-  S --> T{"enabled=yes?"}
-  T -- yes --> U["每 5s 发送心跳帧"]
-  T -- no --> V["等待配置变更"]
-  U --> W["监听配置变更"]
-  V --> W
-  W --> T
+  D --> E["systemd 构建依赖图"]
+  E --> F["multi-user.target 启动"]
+  F --> G["console-monitor-dte.service 被拉起"]
+  G --> H["服务读取 /proc/cmdline"]
+  H --> I["解析 console=ttyS0,9600"]
+  I --> J["打开 /dev/ttyS0 串口"]
+  J --> K["连接 Redis CONFIG_DB"]
+  K --> L["检查 enabled 状态"]
+  L --> M["订阅 keyspace notification"]
+  M --> N{"enabled=yes?"}
+  N -- yes --> O["每 5s 发送心跳帧"]
+  N -- no --> P["等待配置变更"]
+  O --> Q["监听配置变更"]
+  P --> Q
+  Q --> N
 ```
 
 ---
@@ -482,7 +445,7 @@ flowchart TD
 
 超时周期默认 15 秒。如果在此期间未收到心跳，触发超时时间。
 
-#### 3.3.4 Oper 状态判定
+#### 3.3.3 Oper 状态判定
 
 每条链路维护独立状态，采用心跳与数据活动双重检测机制：
 
@@ -500,7 +463,7 @@ STATE_DB 条目：
 *   Field: `oper_state`, Value: `up` / `down`
 *   Field: `last_state_change`, Value: `<timestamp>`（状态变化时间戳）
 
-#### 3.3.5 服务启动与初始化
+#### 3.3.4 服务启动与初始化
 
 console-monitor-dce 服务按以下顺序启动：
 
@@ -533,7 +496,7 @@ console-monitor-dce 服务按以下顺序启动：
     *   15 秒内无心跳，`oper_state` 设为 `down`，记录 `last_state_change` 时间戳
     *   收到首个心跳后，`oper_state` 变为 `up`，记录 `last_state_change` 时间戳
 
-#### 3.3.6 动态配置变更
+#### 3.3.5 动态配置变更
 
 *   监听 CONFIG_DB 配置变更事件（包括 `CONSOLE_PORT` 和 `CONSOLE_SWITCH`）
 *   动态添加、删除或重启链路的 Proxy 实例
@@ -541,7 +504,7 @@ console-monitor-dce 服务按以下顺序启动：
     *   当 `CONSOLE_SWITCH|console_mgmt` 的 `enabled` 从 `"yes"` 变为其他值时，停止所有现有 Proxy
     *   当 `enabled` 变为 `"yes"` 时，根据 `CONSOLE_PORT` 配置启动相应的 Proxy
 
-#### 3.3.7 服务关闭与清理
+#### 3.3.6 服务关闭与清理
 
 当 console-monitor-dce 服务收到关闭信号（SIGINT/SIGTERM）时，每个 proxy 执行清理：
 
@@ -570,7 +533,7 @@ console-monitor-dce 服务按以下顺序启动：
 
 ## 5. CLI
 
-`show line` 命令增加链路 Oper 状态显示：
+`show line` 命令增加链路 Oper State 和 State Duration显示：
 
 ```
 admin@sonic:~$ show line
@@ -594,70 +557,6 @@ admin@sonic:~$ show line
 
 ---
 
-## 6. 流程图
-
-### 6.1 心跳帧检测与过滤流程
-
-```mermaid
-sequenceDiagram
-    participant Serial as 串口
-    participant Proxy
-    participant Buffer
-    participant PTY
-    participant Timer as Buffer 刷新定时器
-    participant HB as 心跳定时器
-    participant Redis as STATE_DB
-
-    Note over Serial,Redis: Case 1: 完整匹配
-    Serial->>Proxy: read() 返回字节
-    Proxy->>Buffer: 追加字节
-    Proxy->>Proxy: 检查模式匹配
-    Proxy-->>Proxy: 检测到完整匹配
-    Proxy->>HB: 重置心跳定时器 (15s)
-    Proxy->>Redis: 若状态变化，更新 oper_state 和 last_state_change
-    Proxy->>Buffer: 清空 buffer
-    Note over Buffer: 心跳字节被丢弃
-
-    Note over Serial,Redis: Case 2: 前缀匹配（部分）
-    Serial->>Proxy: read() 返回字节
-    Proxy->>Buffer: 追加字节
-    Proxy->>Proxy: 检查模式匹配
-    Proxy-->>Proxy: 前缀匹配（等待更多数据）
-    Proxy->>Timer: 启动超时定时器 (1s)
-    Note over Proxy: 等待下次 read...
-
-    Note over Serial,Redis: Case 2a: 前缀匹配完成
-    Serial->>Proxy: read() 返回剩余字节
-    Proxy->>Timer: 取消超时定时器
-    Proxy->>Buffer: 追加字节
-    Proxy->>Proxy: 检查模式匹配
-    Proxy-->>Proxy: 检测到完整匹配
-    Proxy->>HB: 重置心跳定时器 (15s)
-    Proxy->>Redis: 若状态变化，更新 oper_state 和 last_state_change
-    Proxy->>Buffer: 清空 buffer
-
-    Note over Serial,Redis: Case 2b: 匹配完成前超时
-    Timer-->>Proxy: 超时触发 (1s)
-    Proxy->>PTY: 刷新 buffer 内容
-    Proxy->>Buffer: 清空 buffer 并重置匹配位置
-
-    Note over Serial,Redis: Case 3: 前缀不匹配
-    Serial->>Proxy: read() 返回字节
-    Proxy->>Buffer: 追加字节
-    Proxy->>Proxy: 检查模式匹配
-    Proxy-->>Proxy: 在位置 N 前缀不匹配
-    Proxy->>PTY: 输出不匹配的前缀字节
-    Proxy->>Buffer: 移除已输出字节，保留剩余
-    Proxy->>Proxy: 继续匹配
-
-    Note over Serial,Redis: Case 4: 心跳超时
-    HB-->>HB: 15s 无重置
-    HB->>Redis: 更新 oper_state=DOWN, last_state_change=now
-    Note over Redis: 状态变化时记录时间戳
-```
-
----
-
 ## 7. 参考资料
 
 1. [SONiC Console Switch High Level Design](https://github.com/sonic-net/SONiC/blob/master/doc/console/SONiC-Console-Switch-High-Level-Design.md#scope)
@@ -665,3 +564,4 @@ sequenceDiagram
 3. [Systemd Getty Generator Source Code](https://github.com/systemd/systemd/blob/main/src/getty-generator/getty-generator.c)
 4. [Getty Explanation](https://0pointer.de/blog/projects/serial-console.html)
 5. [ASCII Code](https://www.ascii-code.com/)
+6. [agetty(8) - Linux manual page](https://man7.org/linux/man-pages/man8/agetty.8.html)
