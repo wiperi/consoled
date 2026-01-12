@@ -46,7 +46,9 @@
 
 ## 1. Feature Overview
 
-In data center networks, Console Servers (DCE) connect to multiple SONiC Switches (DTE) via serial ports for out-of-band management and console access during failures. The console link serves as the last line of defense in emergency troubleshooting scenarios. If link failures are not detected in time, it significantly increases the difficulty and time cost of troubleshooting. The consoled service provides real-time automatic detection of link Oper state, enabling observability for serial connections and allowing operations teams to monitor link health status instantly. It provides critical support during incident response, improving troubleshooting efficiency and reducing business interruption time.
+In data center networks, Console Servers (DCE) connect to multiple SONiC Switches (DTE) via serial ports for out-of-band management and console access during failures. In emergency troubleshooting scenarios. If link failures are not detected in time or in advance, it significantly increases the difficulty and time cost of troubleshooting. 
+
+The console monitor service provides real-time automatic detection of link Oper state, enabling observability for serial connections and allowing operations teams to monitor link health status instantly. It provides critical support during incident response, improving troubleshooting efficiency and reducing business interruption time.
 
 
 ### 1.1 Feature Requirements
