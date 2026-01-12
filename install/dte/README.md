@@ -1,35 +1,41 @@
-# Console Heartbeat Service
+# Console Monitor DTE Service
 
-一个类似 `serial-getty@.service` 的 systemd 服务模板，从 kernel 命令行参数读取串口配置，并定期向串口发送 "hello"。
+Console Monitor DTE 侧服务，用于向 DCE 发送心跳帧以检测链路连通性。
+
+## 功能
+
+- 从 `/proc/cmdline` 自动读取串口配置（`console=<TTYNAME>,<BAUD>`）
+- 也支持命令行参数指定串口
+- 监听 Redis CONFIG_DB 中的 `enabled` 配置
+- 当 `enabled=yes` 时，每 5 秒发送心跳帧到串口
+- 通过 Redis keyspace notification 实时响应配置变更
 
 ## 组件说明
 
-### 1. console-heartbeat@.service
-Systemd 服务模板文件，使用 `%I` 和 `%i` 作为实例参数占位符。
+### 1. console-monitor-dte
+单文件 Python 可执行脚本，包含所有依赖代码：
 
-- `%I` - 未转义的实例名 (如 `ttyS0`)
-- `%i` - 转义后的实例名 (如 `ttyS0`)
+- 帧协议实现（Frame、FrameType）
+- 串口配置工具（configure_serial）
+- 心跳发送逻辑
 
-### 2. console-heartbeat-generator
-Systemd generator 脚本，在系统启动早期运行：
-
-1. 读取 `/proc/cmdline` 获取 kernel 参数
-2. 解析所有 `console=ttyXXX,BAUDRATE` 格式的参数
-3. 为每个串口创建配置文件和服务实例链接
-
-### 3. console-heartbeat-daemon
-实际的守护进程脚本：
-
-1. 读取配置文件获取波特率
-2. 配置串口参数 (使用 stty)
-3. 每 5 秒向串口发送 "hello"
+### 2. console-monitor-dte.service
+Systemd 服务文件，系统启动后自动运行服务。
 
 ## 安装
 
 ```bash
-cd /home/admin/consoled/systemd
+cd /home/admin/consoled/install/dte
 chmod +x install.sh
 sudo ./install.sh
+```
+
+## 卸载
+
+```bash
+cd /home/admin/consoled/install/dte
+chmod +x uninstall.sh
+sudo ./uninstall.sh
 ```
 
 ## Kernel 命令行参数格式
@@ -38,38 +44,38 @@ sudo ./install.sh
 
 ```
 console=ttyS0,9600
-console=ttyS1,115200n8
+console=ttyS1,115200
 ```
+
+服务会自动解析最后一个 `console=` 参数作为主控制台。
 
 ## 手动操作
 
 ```bash
-# 手动启动服务
-sudo systemctl start console-heartbeat@ttyS0.service
-
-# 查看状态
-sudo systemctl status console-heartbeat@ttyS0.service
-
-# 停止服务
-sudo systemctl stop console-heartbeat@ttyS0.service
+# 查看服务状态
+sudo systemctl status console-monitor-dte.service
 
 # 查看日志
-sudo journalctl -u console-heartbeat@ttyS0.service -f
+sudo journalctl -u console-monitor-dte.service -f
 
-# 设置开机启动（手动）
-sudo systemctl enable console-heartbeat@ttyS0.service
+# 重启服务
+sudo systemctl restart console-monitor-dte.service
+
+# 停止服务
+sudo systemctl stop console-monitor-dte.service
+
+# 启动服务
+sudo systemctl start console-monitor-dte.service
 ```
 
-## 测试 Generator
+## 手动运行（调试用）
 
 ```bash
-# 手动运行 generator 测试
-sudo mkdir -p /tmp/test-gen
-sudo /lib/systemd/system-generators/console-heartbeat-generator /tmp/test-gen '' ''
+# 自动从 /proc/cmdline 读取配置
+python3 /usr/local/bin/console-monitor-dte
 
-# 查看生成的文件
-ls -la /tmp/test-gen/
-cat /run/console-heartbeat/*.conf
+# 指定串口参数
+python3 /usr/local/bin/console-monitor-dte ttyS0 9600
 ```
 
 ## 文件位置
@@ -78,10 +84,8 @@ cat /run/console-heartbeat/*.conf
 
 | 文件 | 位置 |
 |------|------|
-| 服务模板 | `/lib/systemd/system/console-heartbeat@.service` |
-| Generator | `/lib/systemd/system-generators/console-heartbeat-generator` |
-| Daemon 脚本 | `/usr/local/bin/console-heartbeat-daemon` |
-| 运行时配置 | `/run/console-heartbeat/ttyXXX.conf` |
+| 可执行文件 | `/usr/local/bin/console-monitor-dte` |
+| 服务文件 | `/lib/systemd/system/console-monitor-dte.service` |
 
 ## 工作原理
 
@@ -90,35 +94,28 @@ cat /run/console-heartbeat/*.conf
     │
     ▼
 ┌─────────────────────────────────────┐
-│  console-heartbeat-generator        │
-│  读取 /proc/cmdline                  │
+│  console-monitor-dte.service        │
+│  由 systemd 启动                    │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│  console-monitor-dte                │
+│  读取 /proc/cmdline                 │
 │  解析 console=ttyS0,9600            │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│  创建配置文件                        │
-│  /run/console-heartbeat/ttyS0.conf  │
-│  BAUDRATE=9600                      │
+│  连接 Redis CONFIG_DB               │
+│  检查 enabled 状态                  │
+│  订阅 keyspace notification         │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│  创建服务链接                        │
-│  multi-user.target.wants/           │
-│  console-heartbeat@ttyS0.service    │
-└─────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────┐
-│  systemd 启动服务实例               │
-│  console-heartbeat@ttyS0.service    │
-└─────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────┐
-│  console-heartbeat-daemon ttyS0     │
-│  每 5 秒发送 "hello" 到 /dev/ttyS0  │
+│  如果 enabled=yes                   │
+│  每 5 秒发送心跳帧到串口            │
 └─────────────────────────────────────┘
 ```
 
@@ -126,7 +123,7 @@ cat /run/console-heartbeat/*.conf
 
 ```bash
 # 查看 systemd 日志
-journalctl -b | grep console-heartbeat
+journalctl -u console-monitor-dte.service -f
 
 # 查看 kernel 命令行
 cat /proc/cmdline
@@ -134,8 +131,11 @@ cat /proc/cmdline
 # 检查串口设备
 ls -la /dev/ttyS*
 
+# 检查 Redis 配置
+redis-cli -n 4 HGETALL "CONSOLE_SWITCH|controlled_device"
+
 # 监听串口（在另一个终端）
 cat /dev/ttyS0
-# 或使用 minicom/screen
-screen /dev/ttyS0 9600
+# 或使用 picocom
+picocom -b 9600 /dev/ttyS0
 ```

@@ -1,0 +1,14 @@
+[Unit]
+Description=Console Monitor DTE Service
+Documentation=https://github.com/wiperi/consoled
+After=network.target redis-server.service
+Wants=redis-server.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/console-monitor-dte
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

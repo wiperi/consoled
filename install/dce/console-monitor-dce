@@ -1,11 +1,907 @@
 #!/usr/bin/env python3
 """
-Console Monitor DCE - Wrapper Script
+Console Monitor DCE (Data Communications Equipment)
 
-This is a simple wrapper to launch the console-monitor daemon.
+DCE 侧服务：
+1. 监听 Redis CONFIG_DB 配置，为每个串口创建过滤代理
+2. 过滤心跳帧，更新链路状态到 STATE_DB
+3. 非心跳数据透明转发到 PTY
+
+放置位置: /usr/local/bin/console-monitor-dce
+用法: console-monitor-dce [-v|--verbose]
+
+单文件设计：无需额外安装 Python 包，所有依赖内联在此文件中。
 """
 
-from console_monitor.dce import run
+import os
+import sys
+import time
+import argparse
+import asyncio
+import signal
+import logging
+import fcntl
+import termios
+import tty
+from dataclasses import dataclass
+from enum import IntEnum
+from typing import Optional, Callable
+
+import redis.asyncio as aioredis
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+log = logging.getLogger(__name__)
+
+
+# ============================================================
+# 常量定义 (constants.py)
+# ============================================================
+
+# Redis 配置
+REDIS_HOST = "localhost"
+REDIS_PORT = 6379
+REDIS_DB = 4          # 配置数据库
+STATE_DB = 6          # 状态数据库
+KEY_PATTERN = "CONSOLE_PORT|*"
+SWITCH_KEY_PATTERN = "CONSOLE_SWITCH|*"
+
+# 超时配置
+HEARTBEAT_TIMEOUT = 15.0   # 心跳超时（秒）
+
+# 波特率映射
+BAUD_MAP = {
+    1200: termios.B1200,
+    2400: termios.B2400,
+    4800: termios.B4800,
+    9600: termios.B9600,
+    19200: termios.B19200,
+    38400: termios.B38400,
+    57600: termios.B57600,
+    115200: termios.B115200,
+}
+
+
+# ============================================================
+# 帧协议常量 (frame.py)
+# ============================================================
+
+class SpecialChar(IntEnum):
+    """特殊字符定义"""
+    SOF = 0x05  # Start of Frame
+    EOF = 0x00  # End of Frame
+    DLE = 0x10  # Data Link Escape
+
+
+# 可转义字符集合
+ESCAPABLE_CHARS = frozenset({SpecialChar.SOF, SpecialChar.EOF, SpecialChar.DLE})
+
+
+class FrameType(IntEnum):
+    """帧类型定义"""
+    HEARTBEAT = 0x01
+
+
+# 协议版本
+PROTOCOL_VERSION = 0x01
+
+# 帧头帧尾长度
+SOF_LEN = 3
+EOF_LEN = 3
+
+# Buffer 大小限制 (不含帧头帧尾)
+MAX_FRAME_BUFFER_SIZE = 64
+
+# 帧头帧尾序列
+SOF_SEQUENCE = bytes([SpecialChar.SOF] * SOF_LEN)
+EOF_SEQUENCE = bytes([SpecialChar.EOF] * EOF_LEN)
+
+
+# ============================================================
+# CRC16 计算 (frame.py)
+# ============================================================
+
+def crc16_modbus(data: bytes) -> int:
+    """CRC-16/MODBUS 算法"""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x0001:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return crc
+
+
+# ============================================================
+# 转义处理 (frame.py)
+# ============================================================
+
+def escape_data(data: bytes) -> bytes:
+    """对数据进行转义"""
+    result = bytearray()
+    for byte in data:
+        if byte in ESCAPABLE_CHARS:
+            result.append(SpecialChar.DLE)
+        result.append(byte)
+    return bytes(result)
+
+
+def unescape_data(data: bytes) -> bytes:
+    """对数据进行去转义"""
+    result = bytearray()
+    i = 0
+    while i < len(data):
+        if data[i] == SpecialChar.DLE and i + 1 < len(data) and data[i + 1] in ESCAPABLE_CHARS:
+            result.append(data[i + 1])
+            i += 2
+        else:
+            result.append(data[i])
+            i += 1
+    return bytes(result)
+
+
+# ============================================================
+# Frame 类 (frame.py)
+# ============================================================
+
+@dataclass
+class Frame:
+    """帧数据结构"""
+    version: int = PROTOCOL_VERSION
+    seq: int = 0
+    flag: int = 0x00
+    frame_type: int = FrameType.HEARTBEAT
+    payload: bytes = b""
+    
+    def build(self) -> bytes:
+        """构造完整的帧二进制序列"""
+        content = bytes([
+            self.version,
+            self.seq & 0xFF,
+            self.flag,
+            self.frame_type,
+            len(self.payload),
+        ]) + self.payload
+        
+        crc = crc16_modbus(content)
+        crc_bytes = bytes([crc >> 8, crc & 0xFF])
+        
+        content_with_crc = content + crc_bytes
+        escaped_content = escape_data(content_with_crc)
+        
+        return SOF_SEQUENCE + escaped_content + EOF_SEQUENCE
+    
+    @classmethod
+    def parse(cls, buffer: bytes) -> Optional['Frame']:
+        """从 buffer 解析帧"""
+        unescaped = unescape_data(buffer)
+        
+        if len(unescaped) < 7:
+            return None
+        
+        content = unescaped[:-2]
+        crc_bytes = unescaped[-2:]
+        
+        expected_crc = crc16_modbus(content)
+        received_crc = (crc_bytes[0] << 8) | crc_bytes[1]
+        
+        if expected_crc != received_crc:
+            return None
+        
+        if len(content) < 5:
+            return None
+        
+        version = content[0]
+        seq = content[1]
+        flag = content[2]
+        frame_type = content[3]
+        length = content[4]
+        payload = content[5:5 + length] if length > 0 else b""
+        
+        return cls(
+            version=version,
+            seq=seq,
+            flag=flag,
+            frame_type=frame_type,
+            payload=payload,
+        )
+    
+    @classmethod
+    def create_heartbeat(cls, seq: int = 0) -> 'Frame':
+        """创建心跳帧"""
+        return cls(
+            version=PROTOCOL_VERSION,
+            seq=seq,
+            flag=0x00,
+            frame_type=FrameType.HEARTBEAT,
+            payload=b"",
+        )
+    
+    def is_heartbeat(self) -> bool:
+        """判断是否为心跳帧"""
+        return self.frame_type == FrameType.HEARTBEAT
+
+
+# ============================================================
+# FrameFilter 类 (frame.py)
+# ============================================================
+
+FrameCallback = Callable[[Frame], None]
+UserDataCallback = Callable[[bytes], None]
+
+
+class FrameFilter:
+    """帧过滤器"""
+    
+    def __init__(
+        self,
+        on_frame: Optional[FrameCallback] = None,
+        on_user_data: Optional[UserDataCallback] = None,
+    ):
+        self._on_frame = on_frame
+        self._on_user_data = on_user_data
+        self._buffer = bytearray()
+        self._escape_next = False
+        self._in_frame = False
+    
+    def process(self, data: bytes) -> None:
+        """处理输入的字节流"""
+        for byte in data:
+            if self._escape_next:
+                self._buffer.append(byte)
+                self._escape_next = False
+                if len(self._buffer) >= MAX_FRAME_BUFFER_SIZE:
+                    self._flush_buffer()
+            elif byte == SpecialChar.DLE:
+                self._buffer.append(byte)
+                self._escape_next = True
+            elif byte == SpecialChar.SOF:
+                if not self._in_frame:
+                    self._flush_as_user_data()
+                else:
+                    self._discard_buffer()
+                self._in_frame = True
+            elif byte == SpecialChar.EOF:
+                self._try_parse_frame()
+                self._in_frame = False
+            else:
+                self._buffer.append(byte)
+                if len(self._buffer) >= MAX_FRAME_BUFFER_SIZE:
+                    self._flush_buffer()
+    
+    def on_timeout(self) -> None:
+        """超时回调"""
+        if not self._in_frame:
+            self._flush_as_user_data()
+        else:
+            self._discard_buffer()
+        self._in_frame = False
+    
+    def flush(self) -> bytes:
+        """刷新 buffer，返回剩余数据"""
+        result = bytes(self._buffer)
+        self._buffer.clear()
+        self._escape_next = False
+        self._in_frame = False
+        return result
+    
+    def has_pending_data(self) -> bool:
+        """检查是否有待处理的数据"""
+        return len(self._buffer) > 0
+    
+    @property
+    def in_frame(self) -> bool:
+        """检查当前是否在帧内"""
+        return self._in_frame
+    
+    def _flush_as_user_data(self) -> None:
+        """将 buffer 作为用户数据发送"""
+        if self._buffer and self._on_user_data:
+            self._on_user_data(bytes(self._buffer))
+        self._buffer.clear()
+        self._escape_next = False
+    
+    def _discard_buffer(self) -> None:
+        """丢弃 buffer"""
+        self._buffer.clear()
+        self._escape_next = False
+    
+    def _flush_buffer(self) -> None:
+        """根据是否在帧内决定如何处理 buffer 溢出"""
+        if not self._in_frame:
+            self._flush_as_user_data()
+        else:
+            self._discard_buffer()
+        self._in_frame = False
+    
+    def _try_parse_frame(self) -> None:
+        """尝试将 buffer 解析为帧"""
+        if not self._buffer:
+            self._escape_next = False
+            return
+        
+        frame = Frame.parse(bytes(self._buffer))
+        self._buffer.clear()
+        self._escape_next = False
+        
+        if frame is not None and self._on_frame:
+            self._on_frame(frame)
+
+
+# ============================================================
+# 工具函数 (util.py)
+# ============================================================
+
+def get_pty_symlink_prefix() -> str:
+    """从 udevprefix.conf 读取 PTY 符号链接前缀"""
+    try:
+        from sonic_py_common import device_info
+        platform_path, _ = device_info.get_paths_to_platform_and_hwsku_dirs()
+        config_file = os.path.join(platform_path, "udevprefix.conf")
+        
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as f:
+                prefix = f.readline().rstrip()
+                return f"/dev/V{prefix}"
+    except Exception as e:
+        log.warning(f"Failed to read udevprefix.conf: {e}")
+    
+    return "/dev/VC0-"
+
+
+def set_nonblocking(fd: int) -> None:
+    """设置文件描述符为非阻塞模式"""
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+
+def configure_serial(fd: int, baud: int) -> None:
+    """配置串口参数"""
+    attrs = termios.tcgetattr(fd)
+    attrs[0] &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK |
+                  termios.ISTRIP | termios.INLCR | termios.IGNCR |
+                  termios.ICRNL | termios.IXON)
+    attrs[1] &= ~termios.OPOST
+    attrs[2] &= ~(termios.CSIZE | termios.PARENB)
+    attrs[2] |= (termios.CS8 | termios.CREAD | termios.CLOCAL)
+    attrs[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON |
+                  termios.ISIG | termios.IEXTEN)
+    attrs[6][termios.VMIN] = 0
+    attrs[6][termios.VTIME] = 0
+    speed = BAUD_MAP.get(baud, termios.B9600)
+    attrs[4] = attrs[5] = speed
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    termios.tcflush(fd, termios.TCIOFLUSH)
+
+
+def configure_pty(fd: int) -> None:
+    """配置 PTY 为 raw 模式"""
+    tty.setraw(fd, when=termios.TCSANOW)
+    attrs = termios.tcgetattr(fd)
+    attrs[3] &= ~(termios.ECHO | termios.ECHONL)
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+
+
+# ============================================================
+# DbUtil 类 (db_util.py)
+# ============================================================
+
+class DbUtil:
+    """Redis 数据库操作封装"""
+    
+    def __init__(self):
+        self.config_db: Optional[aioredis.Redis] = None
+        self.state_db: Optional[aioredis.Redis] = None
+        self.pubsub: Optional[aioredis.PubSub] = None
+    
+    async def connect(self) -> None:
+        """连接 Redis 数据库"""
+        self.config_db = aioredis.Redis(
+            host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB,
+            decode_responses=True
+        )
+        await self.config_db.ping()  # type: ignore
+        log.info(f"Connected to Redis config db={REDIS_DB}")
+        
+        self.state_db = aioredis.Redis(
+            host=REDIS_HOST, port=REDIS_PORT, db=STATE_DB,
+            decode_responses=True
+        )
+        await self.state_db.ping()  # type: ignore
+        log.info(f"Connected to Redis state db={STATE_DB}")
+    
+    async def close(self) -> None:
+        """关闭 Redis 连接"""
+        if self.pubsub:
+            await self.pubsub.unsubscribe()
+            await self.pubsub.aclose()
+        if self.config_db:
+            await self.config_db.aclose()
+        if self.state_db:
+            await self.state_db.aclose()
+    
+    async def check_console_feature_enabled(self) -> bool:
+        """检查 console switch 功能是否启用"""
+        if not self.config_db:
+            return False
+        
+        try:
+            enabled = await self.config_db.hget("CONSOLE_SWITCH|console_mgmt", "enabled")  # type: ignore
+            if enabled == "yes":
+                log.info("Console switch feature is enabled")
+                return True
+            else:
+                log.warning(f"Console switch feature is disabled (enabled={enabled})")
+                return False
+        except Exception as e:
+            log.error(f"Failed to check console switch feature status: {e}")
+            return False
+    
+    async def subscribe_config_changes(self) -> None:
+        """订阅配置变更事件"""
+        if not self.config_db:
+            return
+        self.pubsub = self.config_db.pubsub()
+        
+        port_pattern = f"__keyspace@{REDIS_DB}__:{KEY_PATTERN}"
+        await self.pubsub.psubscribe(port_pattern)
+        log.info(f"Subscribed: {port_pattern}")
+        
+        switch_pattern = f"__keyspace@{REDIS_DB}__:{SWITCH_KEY_PATTERN}"
+        await self.pubsub.psubscribe(switch_pattern)
+        log.info(f"Subscribed: {switch_pattern}")
+    
+    async def get_config_event(self) -> Optional[dict]:
+        """获取配置变更事件"""
+        if not self.pubsub:
+            return None
+        return await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+    
+    async def get_all_configs(self) -> dict[str, dict]:
+        """获取所有串口配置"""
+        if not self.config_db:
+            return {}
+        
+        keys: list[str] = await self.config_db.keys(KEY_PATTERN)  # type: ignore
+        configs: dict[str, dict] = {}
+        
+        for key in keys:
+            link_id = key.split("|", 1)[-1]
+            data = await self.config_db.hgetall(key)  # type: ignore
+            if data:
+                configs[link_id] = {
+                    "baud": int(data.get("baud_rate", 9600)),
+                    "device": f"/dev/C0-{link_id}",
+                }
+        return configs
+    
+    async def update_state(self, link_id: str, oper_state: str) -> None:
+        """更新串口状态"""
+        if not self.state_db:
+            return
+        
+        key = f"CONSOLE_PORT|{link_id}"
+        
+        try:
+            timestamp = int(time.time())
+            await self.state_db.hset(  # type: ignore
+                key,
+                mapping={
+                    "oper_state": oper_state,
+                    "last_state_change": str(timestamp),
+                }
+            )
+            log.info(f"[{link_id}] State: {oper_state}, state_change: {timestamp}")
+        except Exception as e:
+            log.error(f"[{link_id}] Failed to update state: {e}")
+    
+    async def cleanup_state(self, link_id: str) -> None:
+        """清理 STATE_DB 状态"""
+        if not self.state_db:
+            return
+        
+        key = f"CONSOLE_PORT|{link_id}"
+        
+        try:
+            await self.state_db.hdel(key, "oper_state", "last_state_change")  # type: ignore
+            log.info(f"[{link_id}] STATE_DB cleaned up (oper_state, last_state_change)")
+        except Exception as e:
+            log.error(f"[{link_id}] Failed to cleanup STATE_DB: {e}")
+
+
+# ============================================================
+# SerialProxy 类 (serial_proxy.py)
+# ============================================================
+
+class SerialProxy:
+    """串口代理：创建 PTY 并转发串口数据"""
+    
+    def __init__(self, link_id: str, device: str, baud: int, 
+                 loop: asyncio.AbstractEventLoop,
+                 db: DbUtil,
+                 pty_symlink_prefix: str):
+        self.link_id = link_id
+        self.device = device
+        self.baud = baud
+        self.loop = loop
+        self.db = db
+        self.pty_symlink_prefix = pty_symlink_prefix
+
+        self.ser_fd: int = -1
+        self.pty_master: int = -1
+        self.pty_slave: int = -1
+        self.pty_name: str = ""
+        self.pty_symlink: str = ""
+        self.filter: Optional[FrameFilter] = None
+        self.running: bool = False
+        
+        self.filter_timeout: float = self._calculate_filter_timeout(baud)
+        self._timeout_handle: Optional[asyncio.TimerHandle] = None
+        self._heartbeat_handle: Optional[asyncio.TimerHandle] = None
+        self._current_oper_state: Optional[str] = None
+        self._last_data_activity: float = 0.0
+
+    async def start(self) -> bool:
+        """启动代理"""
+        try:
+            self.pty_master, self.pty_slave = os.openpty()
+            self.pty_name = os.ttyname(self.pty_slave)
+
+            self.ser_fd = os.open(self.device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+
+            configure_serial(self.ser_fd, self.baud)
+            configure_pty(self.pty_master)
+            configure_pty(self.pty_slave)
+            set_nonblocking(self.pty_master)
+            set_nonblocking(self.ser_fd)
+
+            self.filter = FrameFilter(
+                on_frame=self._on_frame_received,
+                on_user_data=self._on_user_data_received,
+            )
+
+            self.loop.add_reader(self.ser_fd, self._on_serial_read)
+            self.loop.add_reader(self.pty_master, self._on_pty_read)
+
+            self.running = True
+
+            self._create_symlink()
+            self._reset_heartbeat_timer()
+
+            log.info(f"[{self.link_id}] Started: {self.device} -> {self.pty_name} ({self.pty_symlink})")
+            return True
+
+        except Exception as e:
+            log.error(f"[{self.link_id}] Failed: {e}")
+            await self.stop()
+            return False
+
+    async def stop(self) -> None:
+        """停止代理"""
+        self.running = False
+
+        await self.db.cleanup_state(self.link_id)
+        self._remove_symlink()
+
+        if self._timeout_handle:
+            self._timeout_handle.cancel()
+            self._timeout_handle = None
+
+        if self._heartbeat_handle:
+            self._heartbeat_handle.cancel()
+            self._heartbeat_handle = None
+
+        for fd in (self.ser_fd, self.pty_master):
+            if fd >= 0:
+                try:
+                    self.loop.remove_reader(fd)
+                except:
+                    pass
+
+        if self.filter and self.pty_master >= 0:
+            remaining = self.filter.flush()
+            if remaining:
+                try:
+                    os.write(self.pty_master, remaining)
+                except:
+                    pass
+
+        for fd in (self.ser_fd, self.pty_master, self.pty_slave):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except:
+                    pass
+
+        self.ser_fd = self.pty_master = self.pty_slave = -1
+        log.info(f"[{self.link_id}] Stopped")
+
+    def _on_serial_read(self) -> None:
+        """串口数据读取回调"""
+        if not self.running or not self.filter:
+            return
+        try:
+            data = os.read(self.ser_fd, 4096)
+            if data:
+                self._log_binary_data(data, "Serial→Filter")
+                self._last_data_activity = time.monotonic()
+
+                if self._timeout_handle:
+                    self._timeout_handle.cancel()
+                    self._timeout_handle = None
+
+                self.filter.process(data)
+
+                if self.filter.has_pending_data():
+                    self._timeout_handle = self.loop.call_later(
+                        self.filter_timeout,
+                        self._on_timeout
+                    )
+        except (BlockingIOError, OSError):
+            pass
+
+    def _on_frame_received(self, frame: Frame) -> None:
+        """帧接收回调"""
+        if frame.is_heartbeat():
+            self._reset_heartbeat_timer()
+            self._update_state("up")
+            log.debug(f"[{self.link_id}] Heartbeat frame received (seq={frame.seq})")
+        else:
+            log.warning(f"[{self.link_id}] Unknown frame type: {frame.frame_type}")
+
+    def _on_user_data_received(self, data: bytes) -> None:
+        """用户数据回调"""
+        if self.pty_master >= 0:
+            try:
+                self._log_binary_data(data, "Filter→PTY")
+                os.write(self.pty_master, data)
+            except OSError:
+                pass
+
+    def _reset_heartbeat_timer(self) -> None:
+        """重置心跳超时定时器"""
+        if self._heartbeat_handle:
+            self._heartbeat_handle.cancel()
+        self._heartbeat_handle = self.loop.call_later(
+            HEARTBEAT_TIMEOUT,
+            self._on_heartbeat_timeout_triggered
+        )
+
+    def _on_heartbeat_timeout_triggered(self) -> None:
+        """心跳超时回调"""
+        self._heartbeat_handle = None
+        if not self.running:
+            return
+
+        now = time.monotonic()
+        if now - self._last_data_activity < HEARTBEAT_TIMEOUT:
+            log.debug(f"[{self.link_id}] Heartbeat timeout but data activity detected, resetting timer")
+            self._reset_heartbeat_timer()
+            return
+
+        log.warning(f"[{self.link_id}] Heartbeat timeout & no data activity")
+        self._update_state("down")
+
+    def _update_state(self, oper_state: str) -> None:
+        """更新 Redis 状态"""
+        if oper_state == self._current_oper_state:
+            return
+        self._current_oper_state = oper_state
+        asyncio.create_task(self.db.update_state(self.link_id, oper_state))
+
+    def _on_timeout(self) -> None:
+        """Filter 超时回调"""
+        self._timeout_handle = None
+        if not self.running or not self.filter:
+            return
+        self.filter.on_timeout()
+        log.debug(f"[{self.link_id}] Filter timeout triggered")
+
+    def _on_pty_read(self) -> None:
+        """PTY 数据读取回调"""
+        if not self.running:
+            return
+        try:
+            data = os.read(self.pty_master, 4096)
+            if data:
+                self._log_binary_data(data, "PTY→Serial")
+                os.write(self.ser_fd, data)
+        except (BlockingIOError, OSError):
+            pass
+
+    def _create_symlink(self) -> None:
+        """创建 PTY 符号链接"""
+        self.pty_symlink = f"{self.pty_symlink_prefix}{self.link_id}"
+        try:
+            if os.path.islink(self.pty_symlink) or os.path.exists(self.pty_symlink):
+                os.unlink(self.pty_symlink)
+            os.symlink(self.pty_name, self.pty_symlink)
+            log.info(f"[{self.link_id}] Symlink: {self.pty_symlink} -> {self.pty_name}")
+        except Exception as e:
+            log.error(f"[{self.link_id}] Failed to create symlink: {e}")
+            self.pty_symlink = ""
+
+    def _remove_symlink(self) -> None:
+        """删除 PTY 符号链接"""
+        if self.pty_symlink:
+            try:
+                if os.path.islink(self.pty_symlink):
+                    os.unlink(self.pty_symlink)
+                    log.info(f"[{self.link_id}] Symlink removed: {self.pty_symlink}")
+            except Exception as e:
+                log.error(f"[{self.link_id}] Failed to remove symlink: {e}")
+            self.pty_symlink = ""
+
+    def _log_binary_data(self, data: bytes, direction: str) -> None:
+        """输出二进制数据到日志"""
+        if os.environ.get('CONSOLE_MONITOR_VERBOSE', 'False') != 'True':
+            return
+            
+        hex_str = data.hex(' ', 1)
+        readable = ''.join(chr(b) if 32 <= b < 127 else f"<0x{b:02x}>" for b in data)
+        log.info(f"[{self.link_id}] {direction} ({len(data)} bytes):\n  HEX: {hex_str}\n  ASCII: {readable}\n")
+        
+        special_bytes = {0x00, 0x05, 0x10}
+        found_special = [f"0x{b:02x}" for b in data if b in special_bytes]
+        if found_special:
+            log.error(f"[{self.link_id}] {direction} contains special bytes: {', '.join(found_special)}")
+            sys.exit(1)
+
+    @staticmethod
+    def _calculate_filter_timeout(baud: int, multiplier: int = 3) -> float:
+        """根据波特率计算帧过滤超时时间"""
+        char_time = 10.0 / baud
+        return char_time * MAX_FRAME_BUFFER_SIZE * multiplier
+
+
+# ============================================================
+# ProxyManager 类 (dce.py)
+# ============================================================
+
+class ProxyManager:
+    """代理管理器"""
+    
+    def __init__(self):
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.db = DbUtil()
+        self.proxies: dict[str, SerialProxy] = {}
+        self.running: bool = False
+        self.pty_symlink_prefix: str = ""
+
+    async def start(self) -> None:
+        """启动管理器"""
+        self.loop = asyncio.get_running_loop()
+
+        await self.db.connect()
+
+        self.pty_symlink_prefix = get_pty_symlink_prefix()
+        log.info(f"PTY symlink prefix: {self.pty_symlink_prefix}")
+
+        await self.sync()
+        await self.db.subscribe_config_changes()
+
+        self.running = True
+
+    async def run(self) -> None:
+        """主循环：监听 Redis 事件"""
+        while self.running:
+            msg = await self.db.get_config_event()
+            if msg:
+                log.info(f"Redis event: {msg.get('data')} on {msg.get('channel')}")
+                await self.sync()
+
+    async def sync(self) -> None:
+        """同步 Redis 配置和实际 proxy"""
+        if not self.loop:
+            return
+
+        feature_enabled = await self.db.check_console_feature_enabled()
+        
+        if not feature_enabled:
+            if self.proxies:
+                log.info("Console switch feature disabled, stopping all proxies...")
+                await asyncio.gather(
+                    *[proxy.stop() for proxy in self.proxies.values()],
+                    return_exceptions=True
+                )
+                self.proxies.clear()
+                log.info("All proxies stopped due to feature disabled")
+            return
+
+        redis_configs = await self.db.get_all_configs()
+
+        redis_ids = set(redis_configs.keys())
+        current_ids = set(self.proxies.keys())
+
+        for link_id in current_ids - redis_ids:
+            await self.proxies[link_id].stop()
+            del self.proxies[link_id]
+
+        for link_id in redis_ids - current_ids:
+            cfg = redis_configs[link_id]
+            proxy = SerialProxy(
+                link_id, cfg["device"], cfg["baud"], self.loop,
+                db=self.db,
+                pty_symlink_prefix=self.pty_symlink_prefix
+            )
+            if await proxy.start():
+                self.proxies[link_id] = proxy
+
+        for link_id in redis_ids & current_ids:
+            cfg = redis_configs[link_id]
+            proxy = self.proxies[link_id]
+            if proxy.baud != cfg["baud"]:
+                await proxy.stop()
+                new_proxy = SerialProxy(
+                    link_id, cfg["device"], cfg["baud"], self.loop,
+                    db=self.db,
+                    pty_symlink_prefix=self.pty_symlink_prefix
+                )
+                if await new_proxy.start():
+                    self.proxies[link_id] = new_proxy
+
+        log.info(f"Sync complete: {len(self.proxies)} proxies active")
+
+    async def stop(self) -> None:
+        """停止管理器"""
+        self.running = False
+
+        if self.proxies:
+            await asyncio.gather(
+                *[proxy.stop() for proxy in self.proxies.values()],
+                return_exceptions=True
+            )
+        
+        self.proxies.clear()
+
+        await self.db.close()
+
+        log.info("Shutdown complete")
+
+
+# ============================================================
+# 主函数
+# ============================================================
+
+async def async_main() -> None:
+    """异步主函数"""
+    manager = ProxyManager()
+
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+
+    def signal_handler():
+        log.info("Received shutdown signal")
+        manager.running = False
+        shutdown_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, signal_handler)
+
+    try:
+        await manager.start()
+        await manager.run()
+    finally:
+        await manager.stop()
+
+
+def run():
+    """入口函数"""
+    parser = argparse.ArgumentParser(description='Console Monitor DCE Service')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Enable verbose output (binary data logging)')
+    args = parser.parse_args()
+    
+    if args.verbose:
+        os.environ['CONSOLE_MONITOR_VERBOSE'] = 'True'
+    
+    asyncio.run(async_main())
+
 
 if __name__ == "__main__":
     run()
