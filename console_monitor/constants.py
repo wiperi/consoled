@@ -2,15 +2,12 @@
 常量定义
 
 包含 console-monitor 使用的全局常量。
+
+注意：Redis 连接信息（db_id, socket_path, separator）由 SonicDBConfig 
+从 /var/run/redis/sonic-db/database_config.json 动态获取，不在此处硬编码。
 """
 
 import termios
-
-# Redis 配置
-REDIS_HOST = "localhost"
-REDIS_PORT = 6379
-REDIS_DB = 4          # 配置数据库
-STATE_DB = 6          # 状态数据库
 
 # 超时配置
 HEARTBEAT_TIMEOUT = 15.0   # 心跳超时（秒）
