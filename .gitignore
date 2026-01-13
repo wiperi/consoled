@@ -21,6 +21,7 @@ build/
 .pytest_cache/
 .coverage*
 htmlcov/
+test-results.xml
 
 .mypy_cache/
 .pytype/
