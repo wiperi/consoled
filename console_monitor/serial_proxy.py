@@ -8,12 +8,14 @@ import os
 import time
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from .frame import Frame, FrameFilter, MAX_FRAME_BUFFER_SIZE
-from .db_util import DbUtil
 from .util import set_nonblocking, configure_serial, configure_pty
 from .constants import HEARTBEAT_TIMEOUT
+
+if TYPE_CHECKING:
+    from .dce import DceDbHelper
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +25,7 @@ class SerialProxy:
     
     def __init__(self, link_id: str, device: str, baud: int, 
                  loop: asyncio.AbstractEventLoop,
-                 db: DbUtil,
+                 db: "DceDbHelper",
                  pty_symlink_prefix: str):
         self.link_id = link_id
         self.device = device

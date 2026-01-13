@@ -1,7 +1,7 @@
 """
 常量定义
 
-包含 console-monitor-dce 使用的全局常量。
+包含 console-monitor 使用的全局常量。
 """
 
 import termios
@@ -11,8 +11,6 @@ REDIS_HOST = "localhost"
 REDIS_PORT = 6379
 REDIS_DB = 4          # 配置数据库
 STATE_DB = 6          # 状态数据库
-KEY_PATTERN = "CONSOLE_PORT|*"
-SWITCH_KEY_PATTERN = "CONSOLE_SWITCH|*"
 
 # 超时配置
 HEARTBEAT_TIMEOUT = 15.0   # 心跳超时（秒）

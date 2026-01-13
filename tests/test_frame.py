@@ -7,10 +7,10 @@ import sys
 import os
 import pytest
 
-# 添加 src 目录到 Python 路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+# 添加项目根目录到 Python 路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from frame import (
+from console_monitor.frame import (
     Frame, FrameFilter, FrameType,
     SpecialChar, PROTOCOL_VERSION,
     crc16_modbus, escape_data, unescape_data,
@@ -293,7 +293,7 @@ class TestFrameFilter:
         user_data1 = b"\x02\x03"
         frame = Frame.create_heartbeat(seq=1)
         frame_data = frame.build()
-        user_data2 = b"\x04\x05"
+        user_data2 = b"\x04\x06"  # 避免使用 0x05 (SOF) 和 0x00 (EOF) 特殊字符
         
         # 发送第一段用户数据
         frame_filter.process(user_data1)

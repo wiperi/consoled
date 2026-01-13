@@ -6,15 +6,17 @@ Console Proxy Service
 """
 
 import os
+import time
 import argparse
 import asyncio
 import signal
 import logging
 from typing import Optional
 
-from .db_util import DbUtil
+from .db_util import RedisDb
 from .serial_proxy import SerialProxy
 from .util import get_pty_symlink_prefix
+from .constants import REDIS_DB, STATE_DB
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +26,97 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+# DCE 专用常量
+CONSOLE_PORT_TABLE = "CONSOLE_PORT"
+CONSOLE_SWITCH_TABLE = "CONSOLE_SWITCH"
+CONSOLE_PORT_PATTERN = "CONSOLE_PORT|*"
+CONSOLE_SWITCH_PATTERN = "CONSOLE_SWITCH|*"
+
+
+# ============================================================
+# DCE 数据库操作封装
+# ============================================================
+
+class DceDbHelper:
+    """DCE 专用数据库操作封装"""
+    
+    def __init__(self):
+        self.config_db = RedisDb(REDIS_DB, "config_db")
+        self.state_db = RedisDb(STATE_DB, "state_db")
+    
+    async def connect(self) -> None:
+        """连接数据库"""
+        await self.config_db.connect()
+        await self.state_db.connect()
+    
+    async def close(self) -> None:
+        """关闭数据库连接"""
+        await self.config_db.close()
+        await self.state_db.close()
+    
+    async def check_console_feature_enabled(self) -> bool:
+        """检查 console switch 功能是否启用"""
+        try:
+            enabled = await self.config_db.hget(CONSOLE_SWITCH_TABLE, "console_mgmt", "enabled")
+            if enabled == "yes":
+                log.info("Console switch feature is enabled")
+                return True
+            else:
+                log.warning(f"Console switch feature is disabled (enabled={enabled})")
+                return False
+        except Exception as e:
+            log.error(f"Failed to check console switch feature status: {e}")
+            return False
+    
+    async def subscribe_config_changes(self) -> None:
+        """订阅配置变更事件（包括 CONSOLE_PORT 和 CONSOLE_SWITCH）"""
+        await self.config_db.psubscribe(CONSOLE_PORT_PATTERN, CONSOLE_SWITCH_PATTERN)
+    
+    async def get_config_event(self) -> Optional[dict]:
+        """获取配置变更事件（非阻塞）"""
+        return await self.config_db.get_message()
+    
+    async def get_all_configs(self) -> dict[str, dict]:
+        """获取所有串口配置"""
+        keys = await self.config_db.keys(CONSOLE_PORT_PATTERN)
+        configs: dict[str, dict] = {}
+        
+        for key in keys:
+            link_id = key.split("|", 1)[-1]
+            data = await self.config_db.hgetall(CONSOLE_PORT_TABLE, link_id)
+            if data:
+                configs[link_id] = {
+                    "baud": int(data.get("baud_rate", 9600)),
+                    "device": f"/dev/C0-{link_id}",
+                }
+        return configs
+    
+    async def update_state(self, link_id: str, oper_state: str) -> None:
+        """更新串口状态（状态变化时更新 last_state_change）"""
+        try:
+            timestamp = int(time.time())
+            await self.state_db.hset(
+                CONSOLE_PORT_TABLE,
+                link_id,
+                {
+                    "oper_state": oper_state,
+                    "last_state_change": str(timestamp),
+                }
+            )
+            log.info(f"[{link_id}] State: {oper_state}, state_change: {timestamp}")
+        except Exception as e:
+            log.error(f"[{link_id}] Failed to update state: {e}")
+    
+    async def cleanup_state(self, link_id: str) -> None:
+        """清理 STATE_DB 状态"""
+        try:
+            # 只删除 console-monitor 管理的字段，保留 consutil 的字段
+            await self.state_db.hdel(CONSOLE_PORT_TABLE, link_id, "oper_state", "last_state_change")
+            log.info(f"[{link_id}] STATE_DB cleaned up (oper_state, last_state_change)")
+        except Exception as e:
+            log.error(f"[{link_id}] Failed to cleanup STATE_DB: {e}")
+
+
 # ============================================================
 # 代理管理
 # ============================================================
@@ -31,7 +124,7 @@ log = logging.getLogger(__name__)
 class ProxyManager:
     def __init__(self):
         self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self.db = DbUtil()
+        self.db = DceDbHelper()
         self.proxies: dict[str, SerialProxy] = {}
         self.running: bool = False
         self.pty_symlink_prefix: str = ""
