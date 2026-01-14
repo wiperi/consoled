@@ -10,13 +10,17 @@ import pytest
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from console_monitor.frame import (
+from console_monitor.console_monitor import (
     Frame, FrameFilter, FrameType,
     SpecialChar, PROTOCOL_VERSION,
     crc16_modbus, escape_data, unescape_data,
-    build_heartbeat_frame,
     SOF_SEQUENCE, EOF_SEQUENCE,
 )
+
+# 便捷函数
+def build_heartbeat_frame(seq: int = 0) -> bytes:
+    """构建心跳帧的便捷函数"""
+    return Frame.create_heartbeat(seq).build()
 
 
 # ============================================================

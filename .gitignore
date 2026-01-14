@@ -22,6 +22,7 @@ build/
 .coverage*
 htmlcov/
 test-results.xml
+coverage.xml
 
 .mypy_cache/
 .pytype/
