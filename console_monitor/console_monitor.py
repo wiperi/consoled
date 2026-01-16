@@ -46,7 +46,7 @@ from swsscommon.swsscommon import (
 # ============================================================
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -117,6 +117,20 @@ MAX_FRAME_BUFFER_SIZE = 64
 # 帧头帧尾序列
 SOF_SEQUENCE = bytes([SpecialChar.SOF] * SOF_LEN)
 EOF_SEQUENCE = bytes([SpecialChar.EOF] * EOF_LEN)
+
+def log_binary_data(data: bytes, direction: str) -> None:
+    """
+    以二进制和可读形式输出数据到终端
+    
+    Args:
+        data: 要输出的字节数据
+        direction: 数据流向（如 "Serial→PTY", "PTY→Serial"）
+    """ 
+    hex_str = data.hex(' ', 1)  # 每字节用空格分隔
+    # 将不可打印字符替换为 <HEX>
+    readable = ''.join(chr(b) if 32 <= b < 127 else f"<0x{b:02x}>" for b in data)
+    log.debug(f"[{direction} ({len(data)} bytes):\n  HEX: {hex_str}\n  ASCII: {readable}\n")
+
 
 
 def crc16_modbus(data: bytes) -> int:
@@ -255,25 +269,37 @@ class FrameFilter:
     
     def process(self, data: bytes) -> None:
         """处理输入的字节流"""
+
+        log_binary_data(data, "Received")
+
         for byte in data:
             if self._escape_next:
+
                 self._buffer.append(byte)
                 self._escape_next = False
                 if len(self._buffer) >= MAX_FRAME_BUFFER_SIZE:
                     self._flush_buffer()
+
             elif byte == SpecialChar.DLE:
+
                 self._buffer.append(byte)
                 self._escape_next = True
+
             elif byte == SpecialChar.SOF:
+
                 if not self._in_frame:
                     self._flush_as_user_data()
                 else:
                     self._discard_buffer()
                 self._in_frame = True
+
             elif byte == SpecialChar.EOF:
+
                 self._try_parse_frame()
                 self._in_frame = False
+
             else:
+                
                 self._buffer.append(byte)
                 if len(self._buffer) >= MAX_FRAME_BUFFER_SIZE:
                     self._flush_buffer()
@@ -306,6 +332,7 @@ class FrameFilter:
     def _flush_as_user_data(self) -> None:
         """将 buffer 作为用户数据发送"""
         if self._buffer and self._on_user_data:
+            log_binary_data(self._buffer, 'User Data')
             self._on_user_data(bytes(self._buffer))
         self._buffer.clear()
         self._escape_next = False
@@ -328,13 +355,21 @@ class FrameFilter:
         if not self._buffer:
             self._escape_next = False
             return
+
+        log_binary_data(self._buffer, 'Frame Data')
         
         frame = Frame.parse(bytes(self._buffer))
         self._buffer.clear()
         self._escape_next = False
         
         if frame is not None and self._on_frame:
+            # 解析成功，回调帧
             self._on_frame(frame)
+
+        # 解析失败，这不应该发生在正常情况下
+        # 因为 SOF...EOF 之间的数据如果不是有效帧，
+        # 说明数据被损坏了，丢弃即可
+
 
 
 # ============================================================
@@ -451,6 +486,7 @@ class SerialProxy:
         self._current_oper_state: Optional[str] = None
         self._last_heartbeat_time: float = 0.0
         self._last_data_activity: float = 0.0
+        self._last_serial_data_time: float = 0.0  # 用于 filter 超时检测
         
         # 线程
         self._thread: Optional[threading.Thread] = None
@@ -551,27 +587,39 @@ class SerialProxy:
     def _run_loop(self) -> None:
         """工作线程主循环"""
         filter_timeout = self._calculate_filter_timeout(self.baud)
-        
+
         while self.running:
             try:
-                # 计算距离下次心跳超时检查的时间
+                # 计算 select 超时时间
                 now = time.monotonic()
                 time_since_heartbeat = now - self._last_heartbeat_time
-                select_timeout = min(filter_timeout, max(0.1, HEARTBEAT_TIMEOUT - time_since_heartbeat))
-                
+                select_timeout = max(0.1, HEARTBEAT_TIMEOUT - time_since_heartbeat)
+
+                # 如果 filter 有待处理数据，需要考虑 filter 超时
+                if self.filter and self.filter.has_pending_data():
+                    time_since_serial = now - self._last_serial_data_time
+                    remaining_filter_timeout = filter_timeout - time_since_serial
+                    if remaining_filter_timeout > 0:
+                        select_timeout = min(select_timeout, remaining_filter_timeout)
+                    else:
+                        # filter 超时已到，立即处理
+                        select_timeout = 0
+
                 # 使用 select 监听串口、PTY 和唤醒管道
                 readable, _, _ = select.select(
                     [self.ser_fd, self.pty_master, self._wake_r],
                     [], [],
                     select_timeout
                 )
-                
+
                 if not self.running:
                     break
-                
+
+                serial_data_received = False
                 for fd in readable:
                     if fd == self.ser_fd:
                         self._on_serial_read()
+                        serial_data_received = True
                     elif fd == self.pty_master:
                         self._on_pty_read()
                     elif fd == self._wake_r:
@@ -580,14 +628,16 @@ class SerialProxy:
                             os.read(self._wake_r, 1024)
                         except:
                             pass
-                
+
                 # 检查心跳超时
                 self._check_heartbeat_timeout()
-                
-                # 检查 filter 超时
-                if self.filter and self.filter.has_pending_data():
-                    self.filter.on_timeout()
-                
+
+                # 检查 filter 超时：只有当没有收到新串口数据且超时时间已到时才触发
+                if self.filter and self.filter.has_pending_data() and not serial_data_received:
+                    now = time.monotonic()
+                    if now - self._last_serial_data_time >= filter_timeout:
+                        self.filter.on_timeout()
+
             except Exception as e:
                 if self.running:
                     log.error(f"[{self.link_id}] Loop error: {e}")
@@ -600,7 +650,9 @@ class SerialProxy:
         try:
             data = os.read(self.ser_fd, 4096)
             if data:
-                self._last_data_activity = time.monotonic()
+                now = time.monotonic()
+                self._last_data_activity = now
+                self._last_serial_data_time = now
                 self.filter.process(data)
         except (BlockingIOError, OSError):
             pass
@@ -708,6 +760,7 @@ class SerialProxy:
         return char_time * MAX_FRAME_BUFFER_SIZE * multiplier
 
 
+
 # ============================================================
 # DCE 服务
 # ============================================================
@@ -764,12 +817,15 @@ class DCEService:
         """主循环"""
         selector = Select()
         selector.addSelectable(self.subscriber)
-        
+
         while self.running:
             try:
-                # 等待事件，超时 1 秒
-                state, _ = selector.select(1000)  # 毫秒
-                
+                # 等待事件，超时 500ms 以便更快响应退出信号
+                state, _ = selector.select(500)
+
+                if not self.running:
+                    break
+
                 if state == Select.OBJECT:
                     # 有配置变更
                     while True:
@@ -777,9 +833,9 @@ class DCEService:
                         if not key:
                             break
                         log.info(f"Config change: {key} {op}")
-                    
+
                     self._sync()
-                    
+
             except Exception as e:
                 if self.running:
                     log.error(f"DCE run loop error: {e}")
@@ -1024,7 +1080,8 @@ class DTEService:
         
         try:
             os.write(self.ser_fd, frame_bytes)
-            log.debug(f"Sent heartbeat (seq={self.seq})")
+            log.debug(f"Sent heartbeat (seq={self.seq}) {' '.join(f'0x{b:02x}' for b in frame_bytes)}")
+
             self.seq = (self.seq + 1) % 256
         except Exception as e:
             log.error(f"Failed to send heartbeat: {e}")
@@ -1037,18 +1094,18 @@ class DTEService:
 def run_dce() -> int:
     """DCE 服务入口"""
     service = DCEService()
-    
+
     # 信号处理
     def signal_handler(signum, frame):
         log.info("Received shutdown signal")
-        service.running = False
-    
+        service.stop()
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     if not service.start():
         return 1
-    
+
     try:
         service.run()
     finally:
