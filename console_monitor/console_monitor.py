@@ -964,9 +964,8 @@ class DTEService:
         """启动服务"""
         try:
             # 打开串口
-            self.ser_fd = os.open(self.device_path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-            configure_serial(self.ser_fd, self.baud)
-            
+            self.ser_fd = os.open(self.device_path, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
+
             # 连接数据库
             self.config_db = DBConnector("CONFIG_DB", 0)
             self.switch_table = Table(self.config_db, CONSOLE_SWITCH_TABLE)
