@@ -36,8 +36,6 @@ from typing import Optional, Callable, Dict
 from swsscommon.swsscommon import (
     DBConnector,
     Table,
-    SubscriberStateTable,
-    Select,
     ConfigDBConnector,
 )
 
@@ -769,16 +767,14 @@ class DCEService:
     """
     DCE 侧服务：管理多个串口代理
     
-    监听 CONFIG_DB 变化，动态添加/删除代理。
+    使用 ConfigDBConnector 的 subscribe/listen 模式监听 CONFIG_DB 变化，
+    符合 SONiC 守护进程规范。
     """
     
     def __init__(self):
-        self.config_db: Optional[DBConnector] = None
+        self.config_db: Optional[ConfigDBConnector] = None
         self.state_db: Optional[DBConnector] = None
-        self.config_table: Optional[Table] = None
         self.state_table: Optional[Table] = None
-        self.switch_table: Optional[Table] = None
-        self.subscriber: Optional[SubscriberStateTable] = None
         
         self.proxies: Dict[str, SerialProxy] = {}
         self.running: bool = False
@@ -787,59 +783,62 @@ class DCEService:
     def start(self) -> bool:
         """启动服务"""
         try:
-            # 连接数据库
-            self.config_db = DBConnector("CONFIG_DB", 0)
+            # 连接 CONFIG_DB（使用 ConfigDBConnector）
+            self.config_db = ConfigDBConnector()
+            self.config_db.connect(wait_for_init=True, retry_on=True)
+            log.info("ConfigDB connected")
+            
+            # 连接 STATE_DB（使用 DBConnector，用于写入状态）
             self.state_db = DBConnector("STATE_DB", 0)
-            
-            self.config_table = Table(self.config_db, CONSOLE_PORT_TABLE)
             self.state_table = Table(self.state_db, CONSOLE_PORT_TABLE)
-            self.switch_table = Table(self.config_db, CONSOLE_SWITCH_TABLE)
-            
-            # 创建订阅者
-            self.subscriber = SubscriberStateTable(self.config_db, CONSOLE_PORT_TABLE)
             
             # 读取 PTY 符号链接前缀
             self.pty_symlink_prefix = get_pty_symlink_prefix()
             log.info(f"PTY symlink prefix: {self.pty_symlink_prefix}")
             
-            # 初始同步
-            self._sync()
-            
             self.running = True
-            log.info("DCE service started")
+            log.info("DCE service initialized")
             return True
             
         except Exception as e:
             log.error(f"Failed to start DCE service: {e}")
             return False
     
+    def register_callbacks(self) -> None:
+        """注册配置变更回调"""
+        
+        def make_callback(func):
+            """创建符合 ConfigDBConnector 格式的回调包装器"""
+            def callback(table, key, data):
+                if data is None:
+                    op = "DEL"
+                    data = {}
+                else:
+                    op = "SET"
+                return func(key, op, data)
+            return callback
+        
+        # 订阅 CONSOLE_PORT 表变更
+        self.config_db.subscribe(CONSOLE_PORT_TABLE, 
+                                  make_callback(self.console_port_handler))
+        
+        # 订阅 CONSOLE_SWITCH 表变更（用于检查功能开关）
+        self.config_db.subscribe(CONSOLE_SWITCH_TABLE,
+                                  make_callback(self.console_switch_handler))
+        
+        log.info("Callbacks registered")
+    
     def run(self) -> None:
-        """主循环"""
-        selector = Select()
-        selector.addSelectable(self.subscriber)
-
-        while self.running:
-            try:
-                # 等待事件，超时 500ms 以便更快响应退出信号
-                state, _ = selector.select(500)
-
-                if not self.running:
-                    break
-
-                if state == Select.OBJECT:
-                    # 有配置变更
-                    while True:
-                        key, op, fvs = self.subscriber.pop()
-                        if not key:
-                            break
-                        log.info(f"Config change: {key} {op}")
-
-                    self._sync()
-
-            except Exception as e:
-                if self.running:
-                    log.error(f"DCE run loop error: {e}")
-                    time.sleep(1)
+        """主循环：使用 ConfigDBConnector.listen() 监听配置变更"""
+        try:
+            # listen() 会阻塞，并在收到配置变更时调用注册的回调
+            # init_data_handler 会在 listen 开始时被调用，传入所有订阅表的初始数据
+            self.config_db.listen(init_data_handler=self._load_initial_config)
+        except KeyboardInterrupt:
+            log.info("Received keyboard interrupt")
+        except Exception as e:
+            if self.running:
+                log.error(f"DCE listen error: {e}")
     
     def stop(self) -> None:
         """停止服务"""
@@ -852,13 +851,49 @@ class DCEService:
         
         log.info("DCE service stopped")
     
+    def _load_initial_config(self, init_data: dict) -> None:
+        """
+        加载初始配置
+        
+        Args:
+            init_data: 包含所有订阅表初始数据的字典
+                       格式: {table_name: {key: {field: value, ...}, ...}, ...}
+        """
+        log.info(f"Loading initial config: {list(init_data.keys())}")
+        
+        # 执行初始同步
+        self._sync()
+    
+    def console_port_handler(self, key: str, op: str, data: dict) -> None:
+        """
+        CONSOLE_PORT 表变更处理器
+        
+        Args:
+            key: 表项的 key（如 "1", "2" 等端口号）
+            op: 操作类型 "SET" 或 "DEL"
+            data: 表项数据
+        """
+        log.info(f"CONSOLE_PORT change: key={key}, op={op}, data={data}")
+        self._sync()
+    
+    def console_switch_handler(self, key: str, op: str, data: dict) -> None:
+        """
+        CONSOLE_SWITCH 表变更处理器
+        
+        Args:
+            key: 表项的 key
+            op: 操作类型 "SET" 或 "DEL"
+            data: 表项数据
+        """
+        log.info(f"CONSOLE_SWITCH change: key={key}, op={op}, data={data}")
+        self._sync()
+    
     def _check_feature_enabled(self) -> bool:
         """检查 console switch 功能是否启用"""
         try:
-            status, fvs = self.switch_table.get("console_mgmt")
-            if status:
-                fvs_dict = dict(fvs)
-                enabled = fvs_dict.get("enabled", "")
+            entry = self.config_db.get_entry(CONSOLE_SWITCH_TABLE, "console_mgmt")
+            if entry:
+                enabled = entry.get("enabled", "")
                 if enabled == "yes":
                     return True
             log.warning("Console switch feature is disabled")
@@ -871,15 +906,14 @@ class DCEService:
         """获取所有串口配置"""
         configs = {}
         try:
-            keys = self.config_table.getKeys()
-            for key in keys:
-                status, fvs = self.config_table.get(key)
-                if status:
-                    fvs_dict = dict(fvs)
-                    configs[key] = {
-                        "baud": int(fvs_dict.get("baud_rate", 9600)),
-                        "device": f"/dev/C0-{key}",
-                    }
+            table_data = self.config_db.get_table(CONSOLE_PORT_TABLE)
+            for key, entry in table_data.items():
+                # ConfigDBConnector 返回的 key 可能是 tuple
+                key_str = str(key) if not isinstance(key, str) else key
+                configs[key_str] = {
+                    "baud": int(entry.get("baud_rate", 9600)),
+                    "device": f"/dev/C0-{key_str}",
+                }
         except Exception as e:
             log.error(f"Failed to get configs: {e}")
         return configs
@@ -940,7 +974,8 @@ class DTEService:
     """
     DTE 侧服务：发送心跳帧
     
-    监听 CONFIG_DB 配置变化，控制心跳发送。
+    使用 ConfigDBConnector 的 subscribe/listen 模式监听 CONFIG_DB 变化，
+    符合 SONiC 守护进程规范。
     """
     
     def __init__(self, tty_name: str, baud: int):
@@ -948,9 +983,7 @@ class DTEService:
         self.baud = baud
         self.device_path = f"/dev/{tty_name}"
         
-        self.config_db: Optional[DBConnector] = None
-        self.switch_table: Optional[Table] = None
-        self.subscriber: Optional[SubscriberStateTable] = None
+        self.config_db: Optional[ConfigDBConnector] = None
         
         self.ser_fd: int = -1
         self.running: bool = False
@@ -965,59 +998,50 @@ class DTEService:
         try:
             # 打开串口
             self.ser_fd = os.open(self.device_path, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
-
-            # 连接数据库
-            self.config_db = DBConnector("CONFIG_DB", 0)
-            self.switch_table = Table(self.config_db, CONSOLE_SWITCH_TABLE)
-            self.subscriber = SubscriberStateTable(self.config_db, CONSOLE_SWITCH_TABLE)
             
-            # 检查初始状态
-            self.enabled = self._check_enabled()
-            log.info(f"Initial enabled state: {self.enabled}")
-            
-            # 如果启用，启动心跳线程
-            if self.enabled:
-                self._start_heartbeat()
+            # 连接 CONFIG_DB（使用 ConfigDBConnector）
+            self.config_db = ConfigDBConnector()
+            self.config_db.connect(wait_for_init=True, retry_on=True)
+            log.info("ConfigDB connected")
             
             self.running = True
-            log.info(f"DTE service started: {self.device_path}")
+            log.info(f"DTE service initialized: {self.device_path}")
             return True
             
         except Exception as e:
             log.error(f"Failed to start DTE service: {e}")
             return False
     
-    def run(self) -> None:
-        """主循环：监听配置变化"""
-        selector = Select()
-        selector.addSelectable(self.subscriber)
+    def register_callbacks(self) -> None:
+        """注册配置变更回调"""
         
-        while self.running:
-            try:
-                state, _ = selector.select(1000)
-                
-                if state == Select.OBJECT:
-                    while True:
-                        key, op, fvs = self.subscriber.pop()
-                        if not key:
-                            break
-                        log.info(f"Config change: {key} {op}")
-                    
-                    # 检查 enabled 状态
-                    new_enabled = self._check_enabled()
-                    if new_enabled != self.enabled:
-                        log.info(f"Enabled state changed: {self.enabled} -> {new_enabled}")
-                        self.enabled = new_enabled
-                        
-                        if self.enabled:
-                            self._start_heartbeat()
-                        else:
-                            self._stop_heartbeat()
-                            
-            except Exception as e:
-                if self.running:
-                    log.error(f"DTE run loop error: {e}")
-                    time.sleep(1)
+        def make_callback(func):
+            """创建符合 ConfigDBConnector 格式的回调包装器"""
+            def callback(table, key, data):
+                if data is None:
+                    op = "DEL"
+                    data = {}
+                else:
+                    op = "SET"
+                return func(key, op, data)
+            return callback
+        
+        # 订阅 CONSOLE_SWITCH 表变更
+        self.config_db.subscribe(CONSOLE_SWITCH_TABLE,
+                                  make_callback(self.console_switch_handler))
+        
+        log.info("Callbacks registered")
+    
+    def run(self) -> None:
+        """主循环：使用 ConfigDBConnector.listen() 监听配置变更"""
+        try:
+            # listen() 会阻塞，并在收到配置变更时调用注册的回调
+            self.config_db.listen(init_data_handler=self._load_initial_config)
+        except KeyboardInterrupt:
+            log.info("Received keyboard interrupt")
+        except Exception as e:
+            if self.running:
+                log.error(f"DTE listen error: {e}")
     
     def stop(self) -> None:
         """停止服务"""
@@ -1033,13 +1057,51 @@ class DTEService:
         
         log.info("DTE service stopped")
     
+    def _load_initial_config(self, init_data: dict) -> None:
+        """
+        加载初始配置
+        
+        Args:
+            init_data: 包含所有订阅表初始数据的字典
+        """
+        log.info(f"Loading initial config: {list(init_data.keys())}")
+        
+        # 检查初始 enabled 状态
+        self.enabled = self._check_enabled()
+        log.info(f"Initial enabled state: {self.enabled}")
+        
+        # 如果启用，启动心跳线程
+        if self.enabled:
+            self._start_heartbeat()
+    
+    def console_switch_handler(self, key: str, op: str, data: dict) -> None:
+        """
+        CONSOLE_SWITCH 表变更处理器
+        
+        Args:
+            key: 表项的 key
+            op: 操作类型 "SET" 或 "DEL"
+            data: 表项数据
+        """
+        log.info(f"CONSOLE_SWITCH change: key={key}, op={op}, data={data}")
+        
+        # 检查 enabled 状态
+        new_enabled = self._check_enabled()
+        if new_enabled != self.enabled:
+            log.info(f"Enabled state changed: {self.enabled} -> {new_enabled}")
+            self.enabled = new_enabled
+            
+            if self.enabled:
+                self._start_heartbeat()
+            else:
+                self._stop_heartbeat()
+    
     def _check_enabled(self) -> bool:
         """检查 controlled_device 的 enabled 字段"""
         try:
-            status, fvs = self.switch_table.get("controlled_device")
-            if status:
-                fvs_dict = dict(fvs)
-                return fvs_dict.get("enabled", "") == "yes"
+            entry = self.config_db.get_entry(CONSOLE_SWITCH_TABLE, "controlled_device")
+            if entry:
+                return entry.get("enabled", "") == "yes"
             return False
         except Exception as e:
             log.warning(f"Failed to check enabled status: {e}")
@@ -1079,8 +1141,8 @@ class DTEService:
         
         try:
             os.write(self.ser_fd, frame_bytes)
-            log.debug(f"Sent heartbeat (seq={self.seq}) {' '.join(f'0x{b:02x}' for b in frame_bytes)}")
-
+            log.debug(f"Sent heartbeat (seq={self.seq})")
+            log_binary_data(frame_bytes, "DTE→Serial")
             self.seq = (self.seq + 1) % 256
         except Exception as e:
             log.error(f"Failed to send heartbeat: {e}")
@@ -1090,23 +1152,28 @@ class DTEService:
 # 主程序入口
 # ============================================================
 
+def signal_handler(signum, frame):
+    """全局信号处理器"""
+    log.info(f"Received signal {signum}")
+    raise SystemExit(0)
+
+
 def run_dce() -> int:
     """DCE 服务入口"""
-    service = DCEService()
-
-    # 信号处理
-    def signal_handler(signum, frame):
-        log.info("Received shutdown signal")
-        service.stop()
-
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-
+    signal.signal(signal.SIGHUP, signal_handler)
+    
+    service = DCEService()
+    
     if not service.start():
         return 1
-
+    
     try:
+        service.register_callbacks()
         service.run()
+    except SystemExit:
+        pass
     finally:
         service.stop()
     
@@ -1115,6 +1182,10 @@ def run_dce() -> int:
 
 def run_dte() -> int:
     """DTE 服务入口"""
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGHUP, signal_handler)
+    
     parser = argparse.ArgumentParser(description='Console Monitor DTE Service')
     parser.add_argument('tty_name', nargs='?', default=None, help='TTY device name')
     parser.add_argument('baud', nargs='?', type=int, default=None, help='Baud rate')
@@ -1134,19 +1205,14 @@ def run_dte() -> int:
     
     service = DTEService(tty_name, baud)
     
-    # 信号处理
-    def signal_handler(signum, frame):
-        log.info("Received shutdown signal")
-        service.running = False
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
     if not service.start():
         return 1
     
     try:
+        service.register_callbacks()
         service.run()
+    except SystemExit:
+        pass
     finally:
         service.stop()
     
