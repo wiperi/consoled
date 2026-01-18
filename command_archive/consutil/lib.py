@@ -160,7 +160,7 @@ class ConsolePortInfo(object):
     @property
     def state_duration(self):
         """Calculate and format the duration since last state change.
-        Format: XyXdXhXmXs (only shows non-zero parts)
+        Format: XdXhXmXs (only shows non-zero parts)
         """
         if not self.last_state_change:
             return None
@@ -173,15 +173,12 @@ class ConsolePortInfo(object):
                 return None
             
             # Calculate time components
-            years, remainder = divmod(diff, 365 * 24 * 3600)
-            days, remainder = divmod(remainder, 24 * 3600)
+            days, remainder = divmod(diff, 24 * 3600)
             hours, remainder = divmod(remainder, 3600)
             minutes, seconds = divmod(remainder, 60)
             
             # Build formatted string, only include non-zero parts
             parts = []
-            if years > 0:
-                parts.append(f"{years}y")
             if days > 0:
                 parts.append(f"{days}d")
             if hours > 0:
@@ -396,17 +393,17 @@ class DbUtils(object):
         self._state_db.set(self._state_db.STATE_DB, key, PID_KEY, pid)
         self._state_db.set(self._state_db.STATE_DB, key, START_TIME_KEY, date)
         
-        # Read existing oper_state and last_heartbeat from STATE_DB
+        # Read existing oper_state and last_state_change from STATE_DB
         existing_data = self._state_db.get_all(self._state_db.STATE_DB, key)
         oper_state = existing_data.get(OPER_STATE_KEY, "") if existing_data else ""
-        last_heartbeat = existing_data.get(LAST_HEARTBEAT_KEY, "") if existing_data else ""
+        last_state_change = existing_data.get(LAST_STATE_CHANGE_KEY, "") if existing_data else ""
         
         return {
             STATE_KEY: state,
             PID_KEY: pid,
             START_TIME_KEY: date,
             OPER_STATE_KEY: oper_state,
-            LAST_HEARTBEAT_KEY: last_heartbeat
+            LAST_STATE_CHANGE_KEY: last_state_change
         }
 
 class InvalidConfigurationError(Exception):
