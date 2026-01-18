@@ -2,19 +2,19 @@
 """
 Console Monitor Service
 
-统一的 Console Monitor 服务，根据 CONFIG_DB 配置自动运行 DCE 或 DTE 模式。
+Unified Console Monitor service that automatically runs in DCE or DTE mode based on CONFIG_DB configuration.
 
-DCE (Console Server 侧):
-- 为每个串口创建 PTY 代理
-- 过滤心跳帧，更新链路状态到 STATE_DB
+DCE (Console Server side):
+- Creates PTY proxy for each serial port
+- Filters heartbeat frames, updates link state to STATE_DB
 
-DTE (SONiC Switch 侧):
-- 定期发送心跳帧
-- 监听 CONFIG_DB 配置变化
+DTE (SONiC Switch side):
+- Periodically sends heartbeat frames
+- Listens for CONFIG_DB configuration changes
 
-使用方法:
-    console-monitor-dce              # 启动 DCE 服务
-    console-monitor-dte [tty] [baud] # 启动 DTE 服务
+Usage:
+    console-monitor-dce              # Start DCE service
+    console-monitor-dte [tty] [baud] # Start DTE service
 """
 
 import os
@@ -40,7 +40,7 @@ from swsscommon.swsscommon import (
 )
 
 # ============================================================
-# 日志配置
+# Logging Configuration
 # ============================================================
 
 logging.basicConfig(
@@ -52,14 +52,14 @@ log = logging.getLogger("console-monitor")
 
 
 # ============================================================
-# 全局常量
+# Global Constants
 # ============================================================
 
-# 超时配置
-HEARTBEAT_INTERVAL = 2.0      # DTE 心跳发送间隔（秒）
-HEARTBEAT_TIMEOUT = 6.0      # DCE 心跳超时（秒）
+# Timeout configuration
+HEARTBEAT_INTERVAL = 2.0      # DTE heartbeat send interval (seconds)
+HEARTBEAT_TIMEOUT = 6.0      # DCE heartbeat timeout (seconds)
 
-# 波特率映射
+# Baud rate mapping
 BAUD_MAP = {
     1200: termios.B1200,
     2400: termios.B2400,
@@ -71,68 +71,68 @@ BAUD_MAP = {
     115200: termios.B115200,
 }
 
-# Redis 表名
+# Redis table names
 CONSOLE_PORT_TABLE = "CONSOLE_PORT"
 CONSOLE_SWITCH_TABLE = "CONSOLE_SWITCH"
 
-# 默认波特率
+# Default baud rate
 DEFAULT_BAUD = 9600
 
-# 内核命令行路径
+# Kernel command line path
 PROC_CMDLINE = "/proc/cmdline"
 
 
 # ============================================================
-# 帧协议常量和类
+# Frame Protocol Constants and Classes
 # ============================================================
 
 class SpecialChar(IntEnum):
-    """特殊字符定义"""
+    """Special character definitions"""
     SOF = 0x05  # Start of Frame
     EOF = 0x00  # End of Frame
     DLE = 0x10  # Data Link Escape
 
 
-# 可转义字符集合
+# Set of escapable characters
 ESCAPABLE_CHARS = frozenset({SpecialChar.SOF, SpecialChar.EOF, SpecialChar.DLE})
 
 
 class FrameType(IntEnum):
-    """帧类型定义"""
+    """Frame type definitions"""
     HEARTBEAT = 0x01
 
 
-# 协议版本
+# Protocol version
 PROTOCOL_VERSION = 0x01
 
-# 帧头帧尾长度
+# SOF/EOF length
 SOF_LEN = 3
 EOF_LEN = 3
 
-# Buffer 大小限制
+# Buffer size limit
 MAX_FRAME_BUFFER_SIZE = 64
 
-# 帧头帧尾序列
+# SOF/EOF sequences
 SOF_SEQUENCE = bytes([SpecialChar.SOF] * SOF_LEN)
 EOF_SEQUENCE = bytes([SpecialChar.EOF] * EOF_LEN)
 
 def log_binary_data(data: bytes, direction: str) -> None:
     """
-    以二进制和可读形式输出数据到终端
+    Output data in binary and readable form to terminal
     
     Args:
-        data: 要输出的字节数据
-        direction: 数据流向（如 "Serial→PTY", "PTY→Serial"）
+        data: Byte data to output
+        direction: Data flow direction (e.g., "Serial→PTY", "PTY→Serial")
     """ 
-    hex_str = data.hex(' ', 1)  # 每字节用空格分隔
-    # 将不可打印字符替换为 <HEX>
+    hex_str = data.hex(' ', 1)  # Space-separated bytes
+    # Replace non-printable characters with <HEX>
     readable = ''.join(chr(b) if 32 <= b < 127 else f"<0x{b:02x}>" for b in data)
     log.debug(f"[{direction} ({len(data)} bytes):\n  HEX: {hex_str}\n  ASCII: {readable}\n")
 
 
 
 def crc16_modbus(data: bytes) -> int:
-    """CRC-16/MODBUS 算法"""
+    """CRC-16/MODBUS algorithm"""
     crc = 0xFFFF
     for byte in data:
         crc ^= byte
@@ -145,7 +145,7 @@ def crc16_modbus(data: bytes) -> int:
 
 
 def escape_data(data: bytes) -> bytes:
-    """对数据进行转义"""
+    """Escape data"""
     result = bytearray()
     for byte in data:
         if byte in ESCAPABLE_CHARS:
@@ -155,7 +155,7 @@ def escape_data(data: bytes) -> bytes:
 
 
 def unescape_data(data: bytes) -> bytes:
-    """对数据进行去转义"""
+    """Unescape data"""
     result = bytearray()
     i = 0
     while i < len(data):
@@ -170,7 +170,7 @@ def unescape_data(data: bytes) -> bytes:
 
 @dataclass
 class Frame:
-    """帧数据结构"""
+    """Frame data structure"""
     version: int = PROTOCOL_VERSION
     seq: int = 0
     flag: int = 0x00
@@ -178,7 +178,7 @@ class Frame:
     payload: bytes = b""
     
     def build(self) -> bytes:
-        """构造完整的帧二进制序列"""
+        """Build complete frame binary sequence"""
         content = bytes([
             self.version,
             self.seq & 0xFF,
@@ -197,7 +197,7 @@ class Frame:
     
     @classmethod
     def parse(cls, buffer: bytes) -> Optional['Frame']:
-        """从 buffer 解析帧"""
+        """Parse frame from buffer"""
         unescaped = unescape_data(buffer)
         
         if len(unescaped) < 7:
@@ -232,7 +232,7 @@ class Frame:
     
     @classmethod
     def create_heartbeat(cls, seq: int = 0) -> 'Frame':
-        """创建心跳帧"""
+        """Create heartbeat frame"""
         return cls(
             version=PROTOCOL_VERSION,
             seq=seq,
@@ -242,17 +242,17 @@ class Frame:
         )
     
     def is_heartbeat(self) -> bool:
-        """判断是否为心跳帧"""
+        """Check if this is a heartbeat frame"""
         return self.frame_type == FrameType.HEARTBEAT
 
 
-# 回调函数类型
+# Callback function types
 FrameCallback = Callable[[Frame], None]
 UserDataCallback = Callable[[bytes], None]
 
 
 class FrameFilter:
-    """帧过滤器：从字节流中识别帧和用户数据"""
+    """Frame filter: identifies frames and user data from byte stream"""
     
     def __init__(
         self,
@@ -266,7 +266,7 @@ class FrameFilter:
         self._in_frame = False
     
     def process(self, data: bytes) -> None:
-        """处理输入的字节流"""
+        """Process input byte stream"""
 
         log_binary_data(data, "Received")
 
@@ -303,7 +303,7 @@ class FrameFilter:
                     self._flush_buffer()
     
     def on_timeout(self) -> None:
-        """超时回调"""
+        """Timeout callback"""
         if not self._in_frame:
             self._flush_as_user_data()
         else:
@@ -311,7 +311,7 @@ class FrameFilter:
         self._in_frame = False
     
     def flush(self) -> bytes:
-        """刷新 buffer，返回剩余数据"""
+        """Flush buffer and return remaining data"""
         result = bytes(self._buffer)
         self._buffer.clear()
         self._escape_next = False
@@ -319,16 +319,16 @@ class FrameFilter:
         return result
     
     def has_pending_data(self) -> bool:
-        """检查是否有待处理的数据"""
+        """Check if there is pending data"""
         return len(self._buffer) > 0
     
     @property
     def in_frame(self) -> bool:
-        """检查当前是否在帧内"""
+        """Check if currently inside a frame"""
         return self._in_frame
     
     def _flush_as_user_data(self) -> None:
-        """将 buffer 作为用户数据发送"""
+        """Send buffer as user data"""
         if self._buffer and self._on_user_data:
             log_binary_data(self._buffer, 'User Data')
             self._on_user_data(bytes(self._buffer))
@@ -336,12 +336,12 @@ class FrameFilter:
         self._escape_next = False
     
     def _discard_buffer(self) -> None:
-        """丢弃 buffer"""
+        """Discard buffer"""
         self._buffer.clear()
         self._escape_next = False
     
     def _flush_buffer(self) -> None:
-        """根据是否在帧内决定如何处理 buffer 溢出"""
+        """Handle buffer overflow based on whether inside a frame"""
         if not self._in_frame:
             self._flush_as_user_data()
         else:
@@ -349,7 +349,7 @@ class FrameFilter:
         self._in_frame = False
     
     def _try_parse_frame(self) -> None:
-        """尝试将 buffer 解析为帧"""
+        """Try to parse buffer as frame"""
         if not self._buffer:
             self._escape_next = False
             return
@@ -361,21 +361,21 @@ class FrameFilter:
         self._escape_next = False
         
         if frame is not None and self._on_frame:
-            # 解析成功，回调帧
+            # Parse successful, invoke frame callback
             self._on_frame(frame)
 
-        # 解析失败，这不应该发生在正常情况下
-        # 因为 SOF...EOF 之间的数据如果不是有效帧，
-        # 说明数据被损坏了，丢弃即可
+        # Parse failed, this should not happen under normal circumstances
+        # Because if data between SOF...EOF is not a valid frame,
+        # it means the data is corrupted, just discard it
 
 
 
 # ============================================================
-# 工具函数
+# Utility Functions
 # ============================================================
 
 def get_pty_symlink_prefix() -> str:
-    """从 udevprefix.conf 读取 PTY 符号链接前缀"""
+    """Read PTY symlink prefix from udevprefix.conf"""
     try:
         from sonic_py_common import device_info
         platform_path, _ = device_info.get_paths_to_platform_and_hwsku_dirs()
@@ -392,13 +392,13 @@ def get_pty_symlink_prefix() -> str:
 
 
 def set_nonblocking(fd: int) -> None:
-    """设置文件描述符为非阻塞模式"""
+    """Set file descriptor to non-blocking mode"""
     flags = fcntl.fcntl(fd, fcntl.F_GETFL)
     fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
 
 def configure_serial(fd: int, baud: int) -> None:
-    """配置串口参数"""
+    """Configure serial port parameters"""
     attrs = termios.tcgetattr(fd)
     attrs[0] &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK |
                   termios.ISTRIP | termios.INLCR | termios.IGNCR |
@@ -417,7 +417,7 @@ def configure_serial(fd: int, baud: int) -> None:
 
 
 def configure_pty(fd: int) -> None:
-    """配置 PTY 为 raw 模式"""
+    """Configure PTY in raw mode"""
     tty.setraw(fd, when=termios.TCSANOW)
     attrs = termios.tcgetattr(fd)
     attrs[3] &= ~(termios.ECHO | termios.ECHONL)
@@ -426,13 +426,13 @@ def configure_pty(fd: int) -> None:
 
 def parse_proc_cmdline() -> tuple[str, int]:
     """
-    从 /proc/cmdline 解析串口配置
+    Parse serial configuration from /proc/cmdline
     
     Returns:
         (tty_name, baud)
     
     Raises:
-        ValueError: 未找到有效的 console 参数
+        ValueError: No valid console parameter found
     """
     try:
         with open(PROC_CMDLINE, 'r') as f:
@@ -454,15 +454,15 @@ def parse_proc_cmdline() -> tuple[str, int]:
 
 
 # ============================================================
-# DCE 串口代理
+# DCE Serial Proxy
 # ============================================================
 
 class SerialProxy:
     """
-    串口代理：创建 PTY 并转发串口数据
+    Serial proxy: creates PTY and forwards serial data
     
-    使用 select 实现多路复用，在独立线程中运行。
-    每个 proxy 拥有独立的 Redis 连接，避免多线程竞争。
+    Uses select for multiplexing, runs in a separate thread.
+    Each proxy has its own Redis connection to avoid multi-thread contention.
     """
     
     def __init__(self, link_id: str, device: str, baud: int, pty_symlink_prefix: str):
@@ -471,7 +471,7 @@ class SerialProxy:
         self.baud = baud
         self.pty_symlink_prefix = pty_symlink_prefix
         
-        # 每个 proxy 创建独立的 Redis 连接，避免多线程竞争
+        # Each proxy creates its own Redis connection to avoid multi-thread contention
         self.state_db: Optional[DBConnector] = None
         self.state_table: Optional[Table] = None
         
@@ -483,58 +483,58 @@ class SerialProxy:
         self.filter: Optional[FrameFilter] = None
         self.running: bool = False
         
-        # 状态跟踪
+        # State tracking
         self._current_oper_state: Optional[str] = None
         self._last_heartbeat_time: float = 0.0
         self._last_data_activity: float = 0.0
-        self._last_serial_data_time: float = 0.0  # 用于 filter 超时检测
+        self._last_serial_data_time: float = 0.0  # For filter timeout detection
         
-        # 线程
+        # Thread
         self._thread: Optional[threading.Thread] = None
         
-        # 用于唤醒 select 的管道
+        # Pipe for waking up select
         self._wake_r: int = -1
         self._wake_w: int = -1
     
     def start(self) -> bool:
-        """启动代理"""
+        """Start proxy"""
         try:
-            # 创建独立的 Redis 连接（每个 proxy 一个，避免多线程竞争）
+            # Create independent Redis connection (one per proxy to avoid multi-thread contention)
             self.state_db = DBConnector("STATE_DB", 0)
             self.state_table = Table(self.state_db, CONSOLE_PORT_TABLE)
             
-            # 创建唤醒管道
+            # Create wake-up pipe
             self._wake_r, self._wake_w = os.pipe()
             set_nonblocking(self._wake_r)
             
-            # 创建 PTY
+            # Create PTY
             self.pty_master, self.pty_slave = os.openpty()
             self.pty_name = os.ttyname(self.pty_slave)
             
-            # 打开串口
+            # Open serial port
             self.ser_fd = os.open(self.device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
             
-            # 配置串口和 PTY
+            # Configure serial port and PTY
             configure_serial(self.ser_fd, self.baud)
             configure_pty(self.pty_master)
             configure_pty(self.pty_slave)
             set_nonblocking(self.pty_master)
             set_nonblocking(self.ser_fd)
             
-            # 创建帧过滤器
+            # Create frame filter
             self.filter = FrameFilter(
                 on_frame=self._on_frame_received,
                 on_user_data=self._on_user_data_received,
             )
             
-            # 创建符号链接
+            # Create symlink
             self._create_symlink()
             
             self.running = True
             self._last_heartbeat_time = time.monotonic()
             self._last_data_activity = time.monotonic()
             
-            # 启动工作线程
+            # Start worker thread
             self._thread = threading.Thread(target=self._run_loop, daemon=True)
             self._thread.start()
             
@@ -547,27 +547,27 @@ class SerialProxy:
             return False
     
     def stop(self) -> None:
-        """停止代理"""
+        """Stop proxy"""
         self.running = False
         
-        # 唤醒 select 循环
+        # Wake up select loop
         if self._wake_w >= 0:
             try:
                 os.write(self._wake_w, b'x')
             except:
                 pass
         
-        # 等待线程结束
+        # Wait for thread to finish
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         
-        # 清理 STATE_DB 状态
+        # Cleanup STATE_DB state
         self._cleanup_state()
         
-        # 删除符号链接
+        # Remove symlink
         self._remove_symlink()
         
-        # 刷新剩余数据
+        # Flush remaining data
         if self.filter and self.pty_master >= 0:
             remaining = self.filter.flush()
             if remaining:
@@ -576,7 +576,7 @@ class SerialProxy:
                 except:
                     pass
         
-        # 关闭文件描述符
+        # Close file descriptors
         for fd in (self._wake_r, self._wake_w, self.ser_fd, self.pty_master, self.pty_slave):
             if fd >= 0:
                 try:
@@ -590,27 +590,27 @@ class SerialProxy:
         log.info(f"[{self.link_id}] Stopped")
     
     def _run_loop(self) -> None:
-        """工作线程主循环"""
+        """Worker thread main loop"""
         filter_timeout = self._calculate_filter_timeout(self.baud)
 
         while self.running:
             try:
-                # 计算 select 超时时间
+                # Calculate select timeout
                 now = time.monotonic()
                 time_since_heartbeat = now - self._last_heartbeat_time
                 select_timeout = max(0.1, HEARTBEAT_TIMEOUT - time_since_heartbeat)
 
-                # 如果 filter 有待处理数据，需要考虑 filter 超时
+                # If filter has pending data, consider filter timeout
                 if self.filter and self.filter.has_pending_data():
                     time_since_serial = now - self._last_serial_data_time
                     remaining_filter_timeout = filter_timeout - time_since_serial
                     if remaining_filter_timeout > 0:
                         select_timeout = min(select_timeout, remaining_filter_timeout)
                     else:
-                        # filter 超时已到，立即处理
+                        # Filter timeout reached, process immediately
                         select_timeout = 0
 
-                # 使用 select 监听串口、PTY 和唤醒管道
+                # Use select to monitor serial port, PTY, and wake-up pipe
                 readable, _, _ = select.select(
                     [self.ser_fd, self.pty_master, self._wake_r],
                     [], [],
@@ -628,16 +628,16 @@ class SerialProxy:
                     elif fd == self.pty_master:
                         self._on_pty_read()
                     elif fd == self._wake_r:
-                        # 清空唤醒管道
+                        # Clear wake-up pipe
                         try:
                             os.read(self._wake_r, 1024)
                         except:
                             pass
 
-                # 检查心跳超时
+                # Check heartbeat timeout
                 self._check_heartbeat_timeout()
 
-                # 检查 filter 超时：只有当没有收到新串口数据且超时时间已到时才触发
+                # Check filter timeout: only trigger when no new serial data received and timeout reached
                 if self.filter and self.filter.has_pending_data() and not serial_data_received:
                     now = time.monotonic()
                     if now - self._last_serial_data_time >= filter_timeout:
@@ -649,7 +649,7 @@ class SerialProxy:
                     time.sleep(0.1)
     
     def _on_serial_read(self) -> None:
-        """串口数据读取回调"""
+        """Serial data read callback"""
         if not self.running or not self.filter:
             return
         try:
@@ -663,7 +663,7 @@ class SerialProxy:
             pass
     
     def _on_pty_read(self) -> None:
-        """PTY 数据读取回调"""
+        """PTY data read callback"""
         if not self.running:
             return
         try:
@@ -674,7 +674,7 @@ class SerialProxy:
             pass
     
     def _on_frame_received(self, frame: Frame) -> None:
-        """帧接收回调"""
+        """Frame received callback"""
         if frame.is_heartbeat():
             self._last_heartbeat_time = time.monotonic()
             self._update_state("Up")
@@ -683,7 +683,7 @@ class SerialProxy:
             log.warning(f"[{self.link_id}] Unknown frame type: {frame.frame_type}")
     
     def _on_user_data_received(self, data: bytes) -> None:
-        """用户数据回调"""
+        """User data callback"""
         if self.pty_master >= 0:
             try:
                 os.write(self.pty_master, data)
@@ -691,25 +691,25 @@ class SerialProxy:
                 pass
     
     def _check_heartbeat_timeout(self) -> None:
-        """检查心跳超时"""
+        """Check heartbeat timeout"""
         now = time.monotonic()
         time_since_heartbeat = now - self._last_heartbeat_time
         
         if time_since_heartbeat >= HEARTBEAT_TIMEOUT:
-            # 检查是否有数据活动
+            # Check if there is data activity
             time_since_data = now - self._last_data_activity
             if time_since_data < HEARTBEAT_TIMEOUT:
-                # 有数据活动，重置心跳时间继续等待
+                # Data activity detected, reset heartbeat time and continue waiting
                 log.debug(f"[{self.link_id}] Heartbeat timeout but data activity detected")
                 self._last_heartbeat_time = now
                 return
             
-            # 既没有心跳也没有数据活动，无法判断故障原因（链路层/系统层/软件层）
+            # No heartbeat and no data activity, cannot determine failure cause (link/system/software layer)
             self._update_state("Unknown")
-            self._last_heartbeat_time = now  # 重置以避免持续触发
+            self._last_heartbeat_time = now  # Reset to avoid continuous triggering
     
     def _update_state(self, oper_state: str) -> None:
-        """更新 Redis 状态（仅在状态变化时更新）"""
+        """Update Redis state (only when state changes)"""
         if oper_state == self._current_oper_state:
             return
         
@@ -726,9 +726,9 @@ class SerialProxy:
             log.error(f"[{self.link_id}] Failed to update state: {e}")
     
     def _cleanup_state(self) -> None:
-        """清理 STATE_DB 状态"""
+        """Cleanup STATE_DB state"""
         try:
-            # 只删除 console-monitor 管理的字段
+            # Only delete fields managed by console-monitor
             self.state_table.hdel(self.link_id, "oper_state")
             self.state_table.hdel(self.link_id, "last_state_change")
             log.info(f"[{self.link_id}] STATE_DB cleaned up")
@@ -736,7 +736,7 @@ class SerialProxy:
             log.error(f"[{self.link_id}] Failed to cleanup STATE_DB: {e}")
     
     def _create_symlink(self) -> None:
-        """创建 PTY 符号链接"""
+        """Create PTY symlink"""
         self.pty_symlink = f"{self.pty_symlink_prefix}{self.link_id}"
         try:
             if os.path.islink(self.pty_symlink) or os.path.exists(self.pty_symlink):
@@ -748,7 +748,7 @@ class SerialProxy:
             self.pty_symlink = ""
     
     def _remove_symlink(self) -> None:
-        """删除 PTY 符号链接"""
+        """Remove PTY symlink"""
         if self.pty_symlink:
             try:
                 if os.path.islink(self.pty_symlink):
@@ -760,23 +760,23 @@ class SerialProxy:
     
     @staticmethod
     def _calculate_filter_timeout(baud: int, multiplier: int = 3) -> float:
-        """根据波特率计算帧过滤超时时间"""
+        """Calculate frame filter timeout based on baud rate"""
         char_time = 10.0 / baud
         return char_time * MAX_FRAME_BUFFER_SIZE * multiplier
 
 
 
 # ============================================================
-# DCE 服务
+# DCE Service
 # ============================================================
 
 class DCEService:
     """
-    DCE 侧服务：管理多个串口代理
+    DCE side service: manages multiple serial proxies
     
-    使用 ConfigDBConnector 的 subscribe/listen 模式监听 CONFIG_DB 变化，
-    符合 SONiC 守护进程规范。
-    每个 SerialProxy 拥有独立的 Redis 连接，避免多线程竞争。
+    Uses ConfigDBConnector's subscribe/listen pattern to monitor CONFIG_DB changes,
+    following SONiC daemon conventions.
+    Each SerialProxy has its own Redis connection to avoid multi-thread contention.
     """
     
     def __init__(self):
@@ -787,14 +787,14 @@ class DCEService:
         self.pty_symlink_prefix: str = ""
     
     def start(self) -> bool:
-        """启动服务"""
+        """Start service"""
         try:
-            # 连接 CONFIG_DB（使用 ConfigDBConnector）
+            # Connect to CONFIG_DB (using ConfigDBConnector)
             self.config_db = ConfigDBConnector()
             self.config_db.connect(wait_for_init=True, retry_on=True)
             log.info("ConfigDB connected")
             
-            # 读取 PTY 符号链接前缀
+            # Read PTY symlink prefix
             self.pty_symlink_prefix = get_pty_symlink_prefix()
             log.info(f"PTY symlink prefix: {self.pty_symlink_prefix}")
             
@@ -807,10 +807,10 @@ class DCEService:
             return False
     
     def register_callbacks(self) -> None:
-        """注册配置变更回调"""
+        """Register configuration change callbacks"""
         
         def make_callback(func):
-            """创建符合 ConfigDBConnector 格式的回调包装器"""
+            """Create callback wrapper compatible with ConfigDBConnector format"""
             def callback(table, key, data):
                 if data is None:
                     op = "DEL"
@@ -820,21 +820,21 @@ class DCEService:
                 return func(key, op, data)
             return callback
         
-        # 订阅 CONSOLE_PORT 表变更
+        # Subscribe to CONSOLE_PORT table changes
         self.config_db.subscribe(CONSOLE_PORT_TABLE, 
                                   make_callback(self.console_port_handler))
         
-        # 订阅 CONSOLE_SWITCH 表变更（用于检查功能开关）
+        # Subscribe to CONSOLE_SWITCH table changes (for checking feature toggle)
         self.config_db.subscribe(CONSOLE_SWITCH_TABLE,
                                   make_callback(self.console_switch_handler))
         
         log.info("Callbacks registered")
     
     def run(self) -> None:
-        """主循环：使用 ConfigDBConnector.listen() 监听配置变更"""
+        """Main loop: use ConfigDBConnector.listen() to monitor configuration changes"""
         try:
-            # listen() 会阻塞，并在收到配置变更时调用注册的回调
-            # init_data_handler 会在 listen 开始时被调用，传入所有订阅表的初始数据
+            # listen() blocks and invokes registered callbacks when configuration changes
+            # init_data_handler is called when listen starts, with initial data from all subscribed tables
             self.config_db.listen(init_data_handler=self._load_initial_config)
         except KeyboardInterrupt:
             log.info("Received keyboard interrupt")
@@ -843,10 +843,10 @@ class DCEService:
                 log.error(f"DCE listen error: {e}")
     
     def stop(self) -> None:
-        """停止服务"""
+        """Stop service"""
         self.running = False
         
-        # 停止所有代理
+        # Stop all proxies
         for proxy in self.proxies.values():
             proxy.stop()
         self.proxies.clear()
@@ -855,43 +855,43 @@ class DCEService:
     
     def _load_initial_config(self, init_data: dict) -> None:
         """
-        加载初始配置
+        Load initial configuration
         
         Args:
-            init_data: 包含所有订阅表初始数据的字典
-                       格式: {table_name: {key: {field: value, ...}, ...}, ...}
+            init_data: Dictionary containing initial data from all subscribed tables
+                       Format: {table_name: {key: {field: value, ...}, ...}, ...}
         """
         log.info(f"Loading initial config: {list(init_data.keys())}")
         
-        # 执行初始同步
+        # Perform initial sync
         self._sync()
     
     def console_port_handler(self, key: str, op: str, data: dict) -> None:
         """
-        CONSOLE_PORT 表变更处理器
+        CONSOLE_PORT table change handler
         
         Args:
-            key: 表项的 key（如 "1", "2" 等端口号）
-            op: 操作类型 "SET" 或 "DEL"
-            data: 表项数据
+            key: Table entry key (e.g., "1", "2" port numbers)
+            op: Operation type "SET" or "DEL"
+            data: Table entry data
         """
         log.info(f"CONSOLE_PORT change: key={key}, op={op}, data={data}")
         self._sync()
     
     def console_switch_handler(self, key: str, op: str, data: dict) -> None:
         """
-        CONSOLE_SWITCH 表变更处理器
+        CONSOLE_SWITCH table change handler
         
         Args:
-            key: 表项的 key
-            op: 操作类型 "SET" 或 "DEL"
-            data: 表项数据
+            key: Table entry key
+            op: Operation type "SET" or "DEL"
+            data: Table entry data
         """
         log.info(f"CONSOLE_SWITCH change: key={key}, op={op}, data={data}")
         self._sync()
     
     def _check_feature_enabled(self) -> bool:
-        """检查 console switch 功能是否启用"""
+        """Check if console switch feature is enabled"""
         try:
             entry = self.config_db.get_entry(CONSOLE_SWITCH_TABLE, "console_mgmt")
             if entry:
@@ -905,12 +905,12 @@ class DCEService:
             return False
     
     def _get_all_configs(self) -> Dict[str, dict]:
-        """获取所有串口配置"""
+        """Get all serial port configurations"""
         configs = {}
         try:
             table_data = self.config_db.get_table(CONSOLE_PORT_TABLE)
             for key, entry in table_data.items():
-                # ConfigDBConnector 返回的 key 可能是 tuple
+                # Key returned by ConfigDBConnector may be a tuple
                 key_str = str(key) if not isinstance(key, str) else key
                 configs[key_str] = {
                     "baud": int(entry.get("baud_rate", 9600)),
@@ -921,10 +921,10 @@ class DCEService:
         return configs
     
     def _sync(self) -> None:
-        """同步配置和代理"""
-        # 检查功能是否启用
+        """Sync configuration and proxies"""
+        # Check if feature is enabled
         if not self._check_feature_enabled():
-            # 功能未启用，停止所有代理
+            # Feature not enabled, stop all proxies
             if self.proxies:
                 log.info("Feature disabled, stopping all proxies")
                 for proxy in self.proxies.values():
@@ -932,17 +932,17 @@ class DCEService:
                 self.proxies.clear()
             return
         
-        # 获取配置
+        # Get configuration
         redis_configs = self._get_all_configs()
         redis_ids = set(redis_configs.keys())
         current_ids = set(self.proxies.keys())
         
-        # 删除不在配置中的代理
+        # Remove proxies not in configuration
         for link_id in current_ids - redis_ids:
             self.proxies[link_id].stop()
             del self.proxies[link_id]
         
-        # 添加新的代理
+        # Add new proxies
         for link_id in redis_ids - current_ids:
             cfg = redis_configs[link_id]
             proxy = SerialProxy(
@@ -951,7 +951,7 @@ class DCEService:
             if proxy.start():
                 self.proxies[link_id] = proxy
         
-        # 更新配置变化的代理
+        # Update proxies with changed configuration
         for link_id in redis_ids & current_ids:
             cfg = redis_configs[link_id]
             proxy = self.proxies[link_id]
@@ -967,15 +967,15 @@ class DCEService:
 
 
 # ============================================================
-# DTE 服务
+# DTE Service
 # ============================================================
 
 class DTEService:
     """
-    DTE 侧服务：发送心跳帧
+    DTE side service: sends heartbeat frames
     
-    使用 ConfigDBConnector 的 subscribe/listen 模式监听 CONFIG_DB 变化，
-    符合 SONiC 守护进程规范。
+    Uses ConfigDBConnector's subscribe/listen pattern to monitor CONFIG_DB changes,
+    following SONiC daemon conventions.
     """
     
     def __init__(self, tty_name: str, baud: int):
@@ -994,12 +994,12 @@ class DTEService:
         self._heartbeat_stop: threading.Event = threading.Event()
     
     def start(self) -> bool:
-        """启动服务"""
+        """Start service"""
         try:
-            # 打开串口
+            # Open serial port
             self.ser_fd = os.open(self.device_path, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
             
-            # 连接 CONFIG_DB（使用 ConfigDBConnector）
+            # Connect to CONFIG_DB (using ConfigDBConnector)
             self.config_db = ConfigDBConnector()
             self.config_db.connect(wait_for_init=True, retry_on=True)
             log.info("ConfigDB connected")
@@ -1013,10 +1013,10 @@ class DTEService:
             return False
     
     def register_callbacks(self) -> None:
-        """注册配置变更回调"""
+        """Register configuration change callbacks"""
         
         def make_callback(func):
-            """创建符合 ConfigDBConnector 格式的回调包装器"""
+            """Create callback wrapper compatible with ConfigDBConnector format"""
             def callback(table, key, data):
                 if data is None:
                     op = "DEL"
@@ -1026,16 +1026,16 @@ class DTEService:
                 return func(key, op, data)
             return callback
         
-        # 订阅 CONSOLE_SWITCH 表变更
+        # Subscribe to CONSOLE_SWITCH table changes
         self.config_db.subscribe(CONSOLE_SWITCH_TABLE,
                                   make_callback(self.console_switch_handler))
         
         log.info("Callbacks registered")
     
     def run(self) -> None:
-        """主循环：使用 ConfigDBConnector.listen() 监听配置变更"""
+        """Main loop: use ConfigDBConnector.listen() to monitor configuration changes"""
         try:
-            # listen() 会阻塞，并在收到配置变更时调用注册的回调
+            # listen() blocks and invokes registered callbacks when configuration changes
             self.config_db.listen(init_data_handler=self._load_initial_config)
         except KeyboardInterrupt:
             log.info("Received keyboard interrupt")
@@ -1044,7 +1044,7 @@ class DTEService:
                 log.error(f"DTE listen error: {e}")
     
     def stop(self) -> None:
-        """停止服务"""
+        """Stop service"""
         self.running = False
         self._stop_heartbeat()
         
@@ -1059,33 +1059,33 @@ class DTEService:
     
     def _load_initial_config(self, init_data: dict) -> None:
         """
-        加载初始配置
+        Load initial configuration
         
         Args:
-            init_data: 包含所有订阅表初始数据的字典
+            init_data: Dictionary containing initial data from all subscribed tables
         """
         log.info(f"Loading initial config: {list(init_data.keys())}")
         
-        # 检查初始 enabled 状态
+        # Check initial enabled state
         self.enabled = self._check_enabled()
         log.info(f"Initial enabled state: {self.enabled}")
         
-        # 如果启用，启动心跳线程
+        # If enabled, start heartbeat thread
         if self.enabled:
             self._start_heartbeat()
     
     def console_switch_handler(self, key: str, op: str, data: dict) -> None:
         """
-        CONSOLE_SWITCH 表变更处理器
+        CONSOLE_SWITCH table change handler
         
         Args:
-            key: 表项的 key
-            op: 操作类型 "SET" 或 "DEL"
-            data: 表项数据
+            key: Table entry key
+            op: Operation type "SET" or "DEL"
+            data: Table entry data
         """
         log.info(f"CONSOLE_SWITCH change: key={key}, op={op}, data={data}")
         
-        # 检查 enabled 状态
+        # Check enabled state
         new_enabled = self._check_enabled()
         if new_enabled != self.enabled:
             log.info(f"Enabled state changed: {self.enabled} -> {new_enabled}")
@@ -1097,7 +1097,7 @@ class DTEService:
                 self._stop_heartbeat()
     
     def _check_enabled(self) -> bool:
-        """检查 controlled_device 的 enabled 字段"""
+        """Check the enabled field of controlled_device"""
         try:
             entry = self.config_db.get_entry(CONSOLE_SWITCH_TABLE, "controlled_device")
             if entry:
@@ -1108,7 +1108,7 @@ class DTEService:
             return False
     
     def _start_heartbeat(self) -> None:
-        """启动心跳线程"""
+        """Start heartbeat thread"""
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             return
         
@@ -1118,7 +1118,7 @@ class DTEService:
         log.info("Heartbeat thread started")
     
     def _stop_heartbeat(self) -> None:
-        """停止心跳线程"""
+        """Stop heartbeat thread"""
         self._heartbeat_stop.set()
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             self._heartbeat_thread.join(timeout=2.0)
@@ -1126,13 +1126,13 @@ class DTEService:
         log.info("Heartbeat thread stopped")
     
     def _heartbeat_loop(self) -> None:
-        """心跳发送循环"""
+        """Heartbeat send loop"""
         while not self._heartbeat_stop.is_set():
             self._send_heartbeat()
             self._heartbeat_stop.wait(HEARTBEAT_INTERVAL)
     
     def _send_heartbeat(self) -> None:
-        """发送心跳帧"""
+        """Send heartbeat frame"""
         if self.ser_fd < 0:
             return
         
@@ -1149,17 +1149,17 @@ class DTEService:
 
 
 # ============================================================
-# 主程序入口
+# Main Program Entry
 # ============================================================
 
 def signal_handler(signum, frame):
-    """全局信号处理器"""
+    """Global signal handler"""
     log.info(f"Received signal {signum}")
     raise SystemExit(0)
 
 
 def run_dce() -> int:
-    """DCE 服务入口"""
+    """DCE service entry point"""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGHUP, signal_handler)
@@ -1181,7 +1181,7 @@ def run_dce() -> int:
 
 
 def run_dte() -> int:
-    """DTE 服务入口"""
+    """DTE service entry point"""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGHUP, signal_handler)
@@ -1191,7 +1191,7 @@ def run_dte() -> int:
     parser.add_argument('baud', nargs='?', type=int, default=None, help='Baud rate')
     args = parser.parse_args()
     
-    # 确定 TTY 和波特率
+    # Determine TTY and baud rate
     if args.tty_name:
         tty_name = args.tty_name
         baud = args.baud if args.baud else DEFAULT_BAUD
@@ -1221,11 +1221,11 @@ def run_dte() -> int:
 
 def main():
     """
-    统一入口：根据命令行参数决定运行模式
+    Unified entry point: determines run mode based on command line arguments
     
     Usage:
-        console-monitor dce    # 运行 DCE 服务
-        console-monitor dte    # 运行 DTE 服务
+        console-monitor dce    # Run DCE service
+        console-monitor dte    # Run DTE service
     """
     if len(sys.argv) < 2:
         print("Usage: console-monitor <dce|dte> [args...]")
@@ -1234,7 +1234,7 @@ def main():
         sys.exit(1)
     
     mode = sys.argv[1].lower()
-    sys.argv = sys.argv[1:]  # 移除 mode 参数，让后续 argparse 处理
+    sys.argv = sys.argv[1:]  # Remove mode argument for subsequent argparse processing
     
     if mode == "dce":
         sys.exit(run_dce())
