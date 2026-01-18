@@ -1,12 +1,12 @@
 [Unit]
-Description=Console Monitor Service - Proxy and Heartbeat Detection
+Description=Console Monitor DCE Service - Proxy and Heartbeat Detection
 Documentation=https://github.com/wiperi/consoled
 After=config-setup.service database.service
 Requires=config-setup.service database.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/console-monitor-dce
+ExecStart=/usr/bin/console-monitor dce
 Restart=always
 RestartSec=10
 StandardOutput=journal

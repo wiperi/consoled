@@ -1,36 +1,32 @@
 #!/bin/bash
 # install.sh
 # 
-# 安装 console-monitor 服务的脚本
+# 安装 console-monitor DCE 服务的脚本
 # 需要 root 权限运行
+#
+# 安装统一的 console-monitor 命令到 /usr/bin/console-monitor
+# 通过 `console-monitor dce` 参数启动 DCE 模式
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Installing console-monitor service..."
+echo "Installing console-monitor DCE service..."
 
-# 1. 安装 Python 包到系统路径
-echo "  Installing Python package..."
-sudo mkdir -p /usr/lib/python3/dist-packages
-sudo cp -r "${SCRIPT_DIR}/../../console_monitor" /usr/lib/python3/dist-packages/console_monitor
-sudo find /usr/lib/python3/dist-packages/console_monitor -name "*.pyc" -delete
-sudo find /usr/lib/python3/dist-packages/console_monitor -name "__pycache__" -type d -delete
+# 1. 安装 console-monitor 可执行文件
+echo "  Installing console-monitor executable..."
+sudo cp "${SCRIPT_DIR}/../../console_monitor/console-monitor" /usr/bin/console-monitor
+sudo chmod +x /usr/bin/console-monitor
 
-# 2. 安装可执行 wrapper
-echo "  Installing executable wrapper..."
-sudo cp "${SCRIPT_DIR}/console-monitor-dce" /usr/local/bin/console-monitor-dce
-sudo chmod +x /usr/local/bin/console-monitor-dce
-
-# 3. 安装服务单元文件
+# 2. 安装服务单元文件
 echo "  Installing service unit..."
 sudo cp "${SCRIPT_DIR}/console-monitor-dce.service" /etc/systemd/system/
 
-# 4. 重新加载 systemd
+# 3. 重新加载 systemd
 echo "  Reloading systemd..."
 sudo systemctl daemon-reload
 
-# 5. 启用开机自启
+# 4. 启用开机自启
 echo "  Enabling service..."
 sudo systemctl enable console-monitor-dce.service
 
@@ -46,4 +42,6 @@ echo "  - To view logs:"
 echo "      sudo journalctl -u console-monitor-dce.service -f"
 echo "  - To restart the service:"
 echo "      sudo systemctl restart console-monitor-dce.service"
+echo "  - Manual run:"
+echo "      console-monitor dce"
 echo ""

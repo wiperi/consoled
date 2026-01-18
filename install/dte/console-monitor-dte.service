@@ -1,12 +1,12 @@
 [Unit]
-Description=Console Monitor DTE Service
+Description=Console Monitor DTE Service - Heartbeat Sender
 Documentation=https://github.com/wiperi/consoled
-After=network.target redis-server.service
-Wants=redis-server.service
+After=config-setup.service database.service
+Requires=config-setup.service database.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/local/bin/console-monitor-dte
+ExecStart=/usr/bin/console-monitor dte
 Restart=always
 RestartSec=5
 

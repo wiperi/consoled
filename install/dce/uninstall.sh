@@ -1,12 +1,12 @@
 #!/bin/bash
 # uninstall.sh
 # 
-# 卸载 console-monitor 服务的脚本
+# 卸载 console-monitor DCE 服务的脚本
 # 需要 root 权限运行
 
 set -e
 
-echo "Uninstalling console-monitor service..."
+echo "Uninstalling console-monitor DCE service..."
 
 # 1. 停止服务
 echo "  Stopping service..."
@@ -20,10 +20,9 @@ sudo systemctl disable console-monitor-dce.service 2>/dev/null || true
 echo "  Removing service unit..."
 sudo rm -f /etc/systemd/system/console-monitor-dce.service
 
-# 4. 删除 Python 包和可执行 wrapper
-echo "  Removing Python package and wrapper..."
-sudo rm -rf /usr/lib/python3/dist-packages/console_monitor
-sudo rm -f /usr/local/bin/console-monitor-dce
+# 4. 删除 console-monitor 可执行文件
+echo "  Removing console-monitor executable..."
+sudo rm -f /usr/bin/console-monitor
 
 # 5. 清理 PTY 符号链接（如果服务异常退出未清理）
 echo "  Cleaning up PTY symlinks..."
