@@ -670,7 +670,7 @@ class SerialProxy:
         """帧接收回调"""
         if frame.is_heartbeat():
             self._last_heartbeat_time = time.monotonic()
-            self._update_state("up")
+            self._update_state("Up")
             log.debug(f"[{self.link_id}] Heartbeat received (seq={frame.seq})")
         else:
             log.warning(f"[{self.link_id}] Unknown frame type: {frame.frame_type}")
@@ -697,8 +697,8 @@ class SerialProxy:
                 self._last_heartbeat_time = now
                 return
             
-            # 既没有心跳也没有数据活动
-            self._update_state("down")
+            # 既没有心跳也没有数据活动，无法判断故障原因（链路层/系统层/软件层）
+            self._update_state("Unknown")
             self._last_heartbeat_time = now  # 重置以避免持续触发
     
     def _update_state(self, oper_state: str) -> None:
