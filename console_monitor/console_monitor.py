@@ -56,8 +56,8 @@ log = logging.getLogger("console-monitor")
 # ============================================================
 
 # 超时配置
-HEARTBEAT_INTERVAL = 5.0      # DTE 心跳发送间隔（秒）
-HEARTBEAT_TIMEOUT = 15.0      # DCE 心跳超时（秒）
+HEARTBEAT_INTERVAL = 2.0      # DTE 心跳发送间隔（秒）
+HEARTBEAT_TIMEOUT = 6.0      # DCE 心跳超时（秒）
 
 # 波特率映射
 BAUD_MAP = {
@@ -462,15 +462,18 @@ class SerialProxy:
     串口代理：创建 PTY 并转发串口数据
     
     使用 select 实现多路复用，在独立线程中运行。
+    每个 proxy 拥有独立的 Redis 连接，避免多线程竞争。
     """
     
-    def __init__(self, link_id: str, device: str, baud: int,
-                 state_table: Table, pty_symlink_prefix: str):
+    def __init__(self, link_id: str, device: str, baud: int, pty_symlink_prefix: str):
         self.link_id = link_id
         self.device = device
         self.baud = baud
-        self.state_table = state_table
         self.pty_symlink_prefix = pty_symlink_prefix
+        
+        # 每个 proxy 创建独立的 Redis 连接，避免多线程竞争
+        self.state_db: Optional[DBConnector] = None
+        self.state_table: Optional[Table] = None
         
         self.ser_fd: int = -1
         self.pty_master: int = -1
@@ -496,6 +499,10 @@ class SerialProxy:
     def start(self) -> bool:
         """启动代理"""
         try:
+            # 创建独立的 Redis 连接（每个 proxy 一个，避免多线程竞争）
+            self.state_db = DBConnector("STATE_DB", 0)
+            self.state_table = Table(self.state_db, CONSOLE_PORT_TABLE)
+            
             # 创建唤醒管道
             self._wake_r, self._wake_w = os.pipe()
             set_nonblocking(self._wake_r)
@@ -769,12 +776,11 @@ class DCEService:
     
     使用 ConfigDBConnector 的 subscribe/listen 模式监听 CONFIG_DB 变化，
     符合 SONiC 守护进程规范。
+    每个 SerialProxy 拥有独立的 Redis 连接，避免多线程竞争。
     """
     
     def __init__(self):
         self.config_db: Optional[ConfigDBConnector] = None
-        self.state_db: Optional[DBConnector] = None
-        self.state_table: Optional[Table] = None
         
         self.proxies: Dict[str, SerialProxy] = {}
         self.running: bool = False
@@ -787,10 +793,6 @@ class DCEService:
             self.config_db = ConfigDBConnector()
             self.config_db.connect(wait_for_init=True, retry_on=True)
             log.info("ConfigDB connected")
-            
-            # 连接 STATE_DB（使用 DBConnector，用于写入状态）
-            self.state_db = DBConnector("STATE_DB", 0)
-            self.state_table = Table(self.state_db, CONSOLE_PORT_TABLE)
             
             # 读取 PTY 符号链接前缀
             self.pty_symlink_prefix = get_pty_symlink_prefix()
@@ -944,8 +946,7 @@ class DCEService:
         for link_id in redis_ids - current_ids:
             cfg = redis_configs[link_id]
             proxy = SerialProxy(
-                link_id, cfg["device"], cfg["baud"],
-                self.state_table, self.pty_symlink_prefix
+                link_id, cfg["device"], cfg["baud"], self.pty_symlink_prefix
             )
             if proxy.start():
                 self.proxies[link_id] = proxy
@@ -957,8 +958,7 @@ class DCEService:
             if proxy.baud != cfg["baud"]:
                 proxy.stop()
                 new_proxy = SerialProxy(
-                    link_id, cfg["device"], cfg["baud"],
-                    self.state_table, self.pty_symlink_prefix
+                    link_id, cfg["device"], cfg["baud"], self.pty_symlink_prefix
                 )
                 if new_proxy.start():
                     self.proxies[link_id] = new_proxy
