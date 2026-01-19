@@ -49,6 +49,8 @@ PICOCOM_BUSY = "Resource temporarily unavailable"
 
 UDEV_PREFIX_CONF_FILENAME = "udevprefix.conf"
 
+PTY_SYMLINK_SUFFIX = "-PTS"
+
 TIMEOUT_SEC = 0.2
 
 class ConsolePortProvider(object):
@@ -216,7 +218,7 @@ class ConsolePortInfo(object):
 
         # build and start picocom command
         flow_cmd = "h" if self.flow_control else "n"
-        cmd = "picocom -b {} -f {} {}{}".format(self.baud, flow_cmd, SysInfoProvider.DEVICE_PREFIX, self.line_num)
+        cmd = "picocom -b {} -f {} {}{}{}".format(self.baud, flow_cmd, SysInfoProvider.DEVICE_PREFIX, self.line_num, PTY_SYMLINK_SUFFIX)
 
         # start connection
         try:
