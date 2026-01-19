@@ -125,7 +125,8 @@ Creates a Proxy between the physical serial port and user applications, responsi
 *   **PTY Creation**
     *   Creates pseudo-terminal pairs for upper-layer applications
 *   **PTY Symlink**
-    *   Creates fixed symlinks (e.g., `/dev/VC0-1`) pointing to dynamic PTY slaves (e.g., `/dev/pts/3`)
+    *   Creates fixed symlinks (e.g., `/dev/C0-1-PTS`) pointing to dynamic PTY slaves (e.g., `/dev/pts/3`)
+    *   Naming convention: `<prefix><link_id>-PTS` where prefix is read from udevprefix.conf
     *   Upper-layer applications (consutil, picocom) use stable device paths
 *   **Heartbeat Filtering**
     *   Identifies heartbeat frames, updates state, and discards heartbeat data
@@ -478,7 +479,7 @@ The console-monitor-dce service starts in the following order:
     *   Establishes connections to CONFIG_DB and STATE_DB
 3.  **Read PTY Symlink Prefix**
     *   Reads device prefix (e.g., `C0-`) from `<platform_path>/udevprefix.conf`
-    *   Constructs virtual device prefix `/dev/V<prefix>` (e.g., `/dev/VC0-`)
+    *   PTY symlinks are created with format: `/dev/<prefix><link_id>-PTS` (e.g., `/dev/C0-1-PTS`)
 4.  **Initial Sync (Check Console Feature)**
     *   Checks the `enabled` field of `CONSOLE_SWITCH|console_mgmt` in CONFIG_DB
     *   If `enabled` is not `"yes"`, skips Proxy initialization; service continues running but does not start any Proxy
@@ -491,7 +492,7 @@ The console-monitor-dce service starts in the following order:
     *   For each serial port configuration in CONFIG_DB:
         *   Open physical serial port (e.g., `/dev/C0-1`)
         *   Create PTY pair (master/slave, e.g., `/dev/pts/X`)
-        *   Create symlink (e.g., `/dev/VC0-1` → `/dev/pts/3`)
+        *   Create symlink (e.g., `/dev/C0-1-PTS` → `/dev/pts/3`)
         *   Configure serial port and PTY to raw mode
         *   Register file descriptors to asyncio event loop
         *   Start heartbeat timeout timer (15 seconds)
@@ -517,7 +518,7 @@ When console-monitor-dce service receives shutdown signal (SIGINT/SIGTERM), each
     *   Only deletes `oper_state` and `last_state_change` fields
     *   Preserves `state`, `pid`, `start_time` fields managed by consutil
 *   **PTY Symlink**
-    *   Deletes symlinks (e.g., `/dev/VC0-1`)
+    *   Deletes symlinks (e.g., `/dev/C0-1-PTS`)
 *   **Buffer Flush**
     *   If filter buffer is non-empty, flush to PTY
 
@@ -525,14 +526,65 @@ When console-monitor-dce service receives shutdown signal (SIGINT/SIGTERM), each
 
 ## 4. Database Changes
 
-### 4.1 STATE_DB
+### 4.1 CONFIG_DB
 
-Table: CONSOLE_PORT_TABLE
+#### 4.1.1 CONSOLE_SWITCH Table
 
 | Key Format | Field | Value | Description |
 |------------|-------|-------|-------------|
-| `CONSOLE_PORT|<link_id>` | `oper_state` | `Up` / `Unknown` | Link operational state |
-| `CONSOLE_PORT|<link_id>` | `last_state_change` | `<timestamp>` | State change timestamp |
+| `CONSOLE_SWITCH\|controlled_device` | `enabled` | `yes` / `no` | Enable/disable DTE side heartbeat sending |
+| `CONSOLE_SWITCH\|console_mgmt` | `enabled` | `yes` / `no` | Enable/disable DCE side console monitor service |
+
+**Example:**
+
+```bash
+admin@sonic:~$ sonic-db-cli CONFIG_DB HGETALL "CONSOLE_SWITCH|controlled_device"
+{'enabled': 'yes'}
+
+admin@sonic:~$ sonic-db-cli CONFIG_DB HGETALL "CONSOLE_SWITCH|console_mgmt"
+{'enabled': 'yes'}
+```
+
+### 4.2 STATE_DB
+
+#### 4.2.1 CONSOLE_PORT Table
+
+| Key Format | Field | Value | Description
+|------------|-------|-------|-------------|
+| `CONSOLE_PORT\|<link_id>` | `oper_state` | `Up` / `Unknown` | Link operational state
+| `CONSOLE_PORT\|<link_id>` | `last_state_change` | `<timestamp>` | Oper state change timestamp
+
+**Example:**
+
+```bash
+admin@sonic:~$ sonic-db-cli STATE_DB HGETALL "CONSOLE_PORT|1"
+ 1) "state"
+ 2) "idle"
+ 3) "pid"
+ 4) ""
+ 5) "start_time"
+ 6) ""
+ 7) "oper_state"
+ 8) "Unknown"
+ 9) "last_state_change"
+10) "1737273845"
+
+admin@sonic:~$ sonic-db-cli STATE_DB HGETALL "CONSOLE_PORT|2"
+ 1) "state"
+ 2) "busy"
+ 3) "pid"
+ 4) "12345"
+ 5) "start_time"
+ 6) "1737270000"
+ 7) "oper_state"
+ 8) "Up"
+ 9) "last_state_change"
+10) "1737060245"
+```
+
+**Note:**
+- `state`, `pid`, `start_time` are managed by consutil
+- `oper_state`, `last_state_change` are managed by console-monitor-dce service
 
 ---
 

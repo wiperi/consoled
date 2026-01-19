@@ -81,6 +81,9 @@ DEFAULT_BAUD = 9600
 # Kernel command line path
 PROC_CMDLINE = "/proc/cmdline"
 
+# PTY symlink suffix
+PTY_SYMLINK_SUFFIX = "-PTS"
+
 
 # ============================================================
 # Frame Protocol Constants and Classes
@@ -384,11 +387,11 @@ def get_pty_symlink_prefix() -> str:
         if os.path.exists(config_file):
             with open(config_file, 'r') as f:
                 prefix = f.readline().rstrip()
-                return f"/dev/V{prefix}"
+                return f"/dev/{prefix}"
     except Exception as e:
         log.warning(f"Failed to read udevprefix.conf: {e}")
     
-    return "/dev/VC0-"
+    return "/dev/C0-"
 
 
 def set_nonblocking(fd: int) -> None:
@@ -510,6 +513,9 @@ class SerialProxy:
             # Create PTY
             self.pty_master, self.pty_slave = os.openpty()
             self.pty_name = os.ttyname(self.pty_slave)
+            
+            # Set PTY slave permissions to allow non-root access
+            os.chmod(self.pty_name, 0o666)
             
             # Open serial port
             self.ser_fd = os.open(self.device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
@@ -737,7 +743,7 @@ class SerialProxy:
     
     def _create_symlink(self) -> None:
         """Create PTY symlink"""
-        self.pty_symlink = f"{self.pty_symlink_prefix}{self.link_id}"
+        self.pty_symlink = f"{self.pty_symlink_prefix}{self.link_id}{PTY_SYMLINK_SUFFIX}"
         try:
             if os.path.islink(self.pty_symlink) or os.path.exists(self.pty_symlink):
                 os.unlink(self.pty_symlink)
