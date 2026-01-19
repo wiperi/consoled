@@ -279,7 +279,7 @@ When frame content (between frame header and trailer) contains special character
 
 #### 3.1.8 Frame Detection and Filtering
 
-![ConsoleMonitorDataFlow](ConsoleMonitorDataFlow.png)
+![ConsoleMonitorDataFlow](./Console-Monitor-High-Level-Desig/ConsoleMonitorDataFlow.png)
 
 **Buffer Design:**
 
@@ -441,7 +441,7 @@ flowchart TD
 
 Topology:
 
-![Console Monitor Structure](ConsoleMonitorStructure.png)
+![Console Monitor Structure](./Console-Monitor-High-Level-Desig/ConsoleMonitorStructure.png)
 
 Each link has an independent Proxy instance, responsible for serial port read/write and state maintenance.
 
@@ -499,7 +499,7 @@ The console-monitor-dce service starts in the following order:
 7.  **Enter Main Loop**
     *   Process serial data, filter heartbeats, update STATE_DB
 8.  **Initial State**
-    *   If no heartbeat within 15 seconds, `oper_state` is set to `Unknown`, recording `last_state_change` timestamp
+    *   If no heartbeat or data activity within 15 seconds, `oper_state` is set to `Unknown`, recording `last_state_change` timestamp
     *   After receiving first heartbeat, `oper_state` becomes `Up`, recording `last_state_change` timestamp
 
 #### 3.3.5 Dynamic Configuration Changes
@@ -601,8 +601,8 @@ Output:
 ```
   Line    Baud    Flow Control    PID    Start Time      Device    Oper State    State Duration
 ------  ------  --------------  -----  ------------  ----------  ------------  ----------------
-     1    9600        Disabled      -             -   Terminal1             Up          3d16h34s
-     2    9600        Disabled      -             -   Terminal2        Unknown              1h5m
+     1    9600        Disabled      -             -   Terminal1             Up       3d16h24m34s
+     2    9600        Disabled      -             -   Terminal2        Unknown           1h5m17s
 ```
 
 New columns:
@@ -622,3 +622,4 @@ New columns:
 4. [Getty Explanation](https://0pointer.de/blog/projects/serial-console.html)
 5. [ASCII Code](https://www.ascii-code.com/)
 6. [agetty(8) - Linux manual page](https://man7.org/linux/man-pages/man8/agetty.8.html)
+7. [agetty source code](https://github.com/util-linux/util-linux/blob/master/term-utils/agetty.c)
