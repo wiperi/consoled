@@ -1,5 +1,3 @@
 #!/bin/bash
 
-cd /home/admin/consoled
-
-sudo $(which python3) -m console_monitor.console_monitor "$@"
+sudo /usr/bin/python /home/admin/consoled/console_monitor/console-monitor "$@"
