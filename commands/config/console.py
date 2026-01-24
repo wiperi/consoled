@@ -50,6 +50,7 @@ def disable_console_switch(db):
         ctx = click.get_current_context()
         ctx.fail("Invalid ConfigDB. Error: {}".format(e))
 
+
 #
 # 'console heartbeat' group ('config console heartbeat ...')
 #
@@ -64,7 +65,7 @@ def update_console_heartbeat(db, mode):
     dataKey1 = 'controlled_device'
     dataKey2 = 'enabled'
 
-    data = { dataKey2 : "yes" if mode == "enable" else "no" }
+    data = {dataKey2: "yes" if mode == "enable" else "no"}
     try:
         config_db.mod_entry(table, dataKey1, data)
     except ValueError as e:

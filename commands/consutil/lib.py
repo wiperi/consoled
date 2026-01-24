@@ -9,6 +9,8 @@ import pexpect
 import re
 import subprocess
 import sys
+import time
+
 
 import click
 from sonic_py_common import device_info
@@ -115,7 +117,6 @@ class ConsolePortProvider(object):
                 if k not in keys:
                     port = { LINE_KEY: k }
                     ports.append(port)
-        
         self._ports = ports
 
 class ConsolePortInfo(object):
@@ -167,29 +168,28 @@ class ConsolePortInfo(object):
         if not self.last_state_change:
             return None
         try:
-            import time
             ts = int(self.last_state_change)
             now = int(time.time())
             diff = now - ts
             if diff < 0:
                 return None
-            
+
             # Calculate time components
             days, remainder = divmod(diff, 24 * 3600)
             hours, remainder = divmod(remainder, 3600)
             minutes, seconds = divmod(remainder, 60)
-            
-            # Build formatted string, only include non-zero parts
+
+            # Build formatted string, only include non-zero parts for d/h/m, always show seconds
             parts = []
             if days > 0:
                 parts.append(f"{days}d")
-            if hours > 0:
+            if hours > 0 or days > 0:
                 parts.append(f"{hours}h")
-            if minutes > 0:
+            if minutes > 0 or hours > 0 or days > 0:
                 parts.append(f"{minutes}m")
-            if seconds > 0 or not parts:  # Always show seconds if nothing else
-                parts.append(f"{seconds}s")
-            
+
+            parts.append(f"{seconds}s")  # Always show seconds
+
             return "".join(parts)
         except (ValueError, OSError):
             return None
@@ -218,7 +218,9 @@ class ConsolePortInfo(object):
 
         # build and start picocom command
         flow_cmd = "h" if self.flow_control else "n"
-        cmd = "picocom -b {} -f {} {}{}{}".format(self.baud, flow_cmd, SysInfoProvider.DEVICE_PREFIX, self.line_num, PTY_SYMLINK_SUFFIX)
+        cmd = "picocom -b {} -f {} {}{}{}".format(
+            self.baud, flow_cmd, SysInfoProvider.DEVICE_PREFIX,
+            self.line_num, PTY_SYMLINK_SUFFIX)
 
         # start connection
         try:
@@ -361,8 +363,8 @@ class SysInfoProvider(object):
         regex_date = r"([A-Z][a-z]{2} [A-Z][a-z]{2} [\d ]\d \d{2}:\d{2}:\d{2} \d{4})"
         # matches any characters ending in minicom or picocom,
         # then a space and any chars followed by /dev/ttyUSB<any digits>,
-        # then a space and any chars
-        regex_cmd = r".*(?:(?:mini)|(?:pico))com .*" + SysInfoProvider.DEVICE_PREFIX + r"(\d+)(?: .*)?"
+        # then any chars
+        regex_cmd = r".*(?:(?:mini)|(?:pico))com .*" + SysInfoProvider.DEVICE_PREFIX + r"(\d+).*"
         regex_process = re.compile(r"^" + regex_pid + r" " + regex_date + r" " + regex_cmd + r"$")
 
         console_processes = {}
@@ -394,12 +396,12 @@ class DbUtils(object):
         self._state_db.set(self._state_db.STATE_DB, key, STATE_KEY, state)
         self._state_db.set(self._state_db.STATE_DB, key, PID_KEY, pid)
         self._state_db.set(self._state_db.STATE_DB, key, START_TIME_KEY, date)
-        
+
         # Read existing oper_state and last_state_change from STATE_DB
         existing_data = self._state_db.get_all(self._state_db.STATE_DB, key)
         oper_state = existing_data.get(OPER_STATE_KEY, "") if existing_data else ""
         last_state_change = existing_data.get(LAST_STATE_CHANGE_KEY, "") if existing_data else ""
-        
+
         return {
             STATE_KEY: state,
             PID_KEY: pid,
