@@ -67,7 +67,7 @@ sync_file \
 echo ""
 echo ">>> Syncing to SONiC..."
 sync_file \
-    "docs/Console-Monitor-HLD.md" \
+    "docs/Console-Monitor-High-Level-Design.md" \
     "downstream/SONiC/doc/console/Console-Monitor-High-Level-Design.md"
 
 echo ""

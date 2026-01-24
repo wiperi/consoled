@@ -25,7 +25,7 @@
   - [3.3 DCE Side Service](#33-dce-side-service)
 - [4. Database Changes](#4-database-changes)
 - [5. CLI](#5-cli)
-- [6. Flow Diagrams](#6-flow-diagrams)
+- [6. Example Configuration](#6-example-configuration)
 - [7. References](#7-references)
 
 ---
