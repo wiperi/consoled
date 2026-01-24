@@ -1,0 +1,16 @@
+[submodule "downstream/sonic-host-services"]
+	path = downstream/sonic-host-services
+	url = https://github.com/wiperi/sonic-host-services.git
+	branch = cliffchen/submit/console-monitor
+[submodule "downstream/sonic-utilities"]
+	path = downstream/sonic-utilities
+	url = https://github.com/wiperi/sonic-utilities.git
+	branch = cliffchen/submit/console_monitor_commands
+[submodule "downstream/SONiC"]
+	path = downstream/SONiC
+	url = https://github.com/wiperi/SONiC.git
+	branch = cliffchen/submit/console-monitor-hld
+[submodule "downstream/sonic-mgmt"]
+	path = downstream/sonic-mgmt
+	url = https://github.com/wiperi/sonic-mgmt.git
+	branch = cliffchen/submit/console_monitor_testplan
