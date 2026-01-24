@@ -6,7 +6,7 @@ sync_downstream.py - 同步 consoled 项目文件到 downstream 子模块
 """
 
 import os
-import shutil
+import subprocess
 from pathlib import Path
 
 # 颜色输出
@@ -17,34 +17,35 @@ NC = '\033[0m'  # No Color
 
 
 def sync_file(src: Path, dst: Path) -> bool:
-    """同步单个文件"""
+    """同步单个文件（使用sudo）"""
     if not src.is_file():
         print(f"{YELLOW}[SKIP]{NC} Source file not found: {src}")
         return False
 
     # 创建目标目录
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["sudo", "mkdir", "-p", str(dst.parent)], check=True)
 
     # 复制文件
-    shutil.copy2(src, dst)
+    subprocess.run(["sudo", "cp", "-f", str(src), str(dst)], check=True)
     print(f"{GREEN}[SYNC]{NC} {src} -> {dst}")
     return True
 
 
 def sync_dir(src: Path, dst: Path) -> bool:
-    """同步目录"""
+    """同步目录（使用sudo）"""
     if not src.is_dir():
         print(f"{YELLOW}[SKIP]{NC} Source directory not found: {src}")
         return False
 
     # 创建目标目录的父目录
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["sudo", "mkdir", "-p", str(dst.parent)], check=True)
 
-    # 删除已存在的目标目录，然后复制
-    if dst.exists():
-        shutil.rmtree(dst)
-
-    shutil.copytree(src, dst)
+    # 使用 rsync 同步目录
+    subprocess.run(
+        ["sudo", "rsync", "-av", "--delete", f"{src}/", f"{dst}/"],
+        check=True,
+        stdout=subprocess.DEVNULL
+    )
     print(f"{GREEN}[SYNC]{NC} {src}/ -> {dst}/")
     return True
 
@@ -91,6 +92,18 @@ def main():
             "downstream/sonic-utilities/config/console.py",
             False,  # 文件
         ),
+        # local Python packages - consutil 目录
+        (
+            "commands/consutil",
+            "/usr/local/lib/python3.11/dist-packages/consutil",
+            True,  # 目录
+        ),
+        # local Python packages - config/console.py
+        (
+            "commands/config/console.py",
+            "/usr/local/lib/python3.11/dist-packages/config/console.py",
+            False,  # 文件
+        ),
     ]
 
     # 按目标仓库分组显示
@@ -99,6 +112,7 @@ def main():
         "SONiC": [],
         "sonic-mgmt": [],
         "sonic-utilities": [],
+        "dist-packages": [],
     }
 
     for src, dst, is_dir in sync_mappings:

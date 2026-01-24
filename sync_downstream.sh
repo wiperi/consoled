@@ -28,10 +28,10 @@ sync_file() {
     fi
     
     # 创建目标目录
-    mkdir -p "$(dirname "$dst")"
+    sudo mkdir -p "$(dirname "$dst")"
     
     # 复制文件
-    cp -f "$src" "$dst"
+    sudo cp -f "$src" "$dst"
     echo -e "${GREEN}[SYNC]${NC} $src -> $dst"
 }
 
@@ -46,14 +46,14 @@ sync_dir() {
     fi
     
     # 创建目标目录的父目录
-    mkdir -p "$(dirname "$dst")"
+    sudo mkdir -p "$(dirname "$dst")"
     
     # 使用 rsync 同步目录（如果有的话），否则用 cp
     if command -v rsync &> /dev/null; then
-        rsync -av --delete "$src/" "$dst/" > /dev/null
+        sudo rsync -av --delete "$src/" "$dst/" > /dev/null
     else
-        rm -rf "$dst"
-        cp -rf "$src" "$dst"
+        sudo rm -rf "$dst"
+        sudo cp -rf "$src" "$dst"
     fi
     echo -e "${GREEN}[SYNC]${NC} $src/ -> $dst/"
 }
@@ -85,6 +85,16 @@ sync_dir \
 sync_file \
     "commands/config/console.py" \
     "downstream/sonic-utilities/config/console.py"
+
+echo ""
+echo ">>> Syncing to local Python packages..."
+sync_dir \
+    "commands/consutil" \
+    "/usr/local/lib/python3.11/dist-packages/consutil"
+
+sync_file \
+    "commands/config/console.py" \
+    "/usr/local/lib/python3.11/dist-packages/config/console.py"
 
 echo ""
 echo "=========================================="
