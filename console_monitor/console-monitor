@@ -2,10 +2,15 @@
 """
 Console Monitor Service
 
-Unified Console Monitor service that automatically runs in DCE or DTE mode based on CONFIG_DB configuration.
+Unified Console Monitor service that runs in DCE, DTE, or Proxy mode.
 
-DCE (Console Server side):
-- Creates PTY proxy for each serial port
+DCE (Console Server side - main process):
+- Monitors CONFIG_DB for configuration changes
+- Manages proxy services via systemctl
+
+Proxy (Console Server side - per-port process):
+- Runs as independent process for each serial port
+- Creates PTY proxy and forwards serial data
 - Filters heartbeat frames, updates link state to STATE_DB
 
 DTE (SONiC Switch side):
@@ -13,8 +18,9 @@ DTE (SONiC Switch side):
 - Listens for CONFIG_DB configuration changes
 
 Usage:
-    console-monitor-dce              # Start DCE service
-    console-monitor-dte [tty] [baud] # Start DTE service
+    console-monitor dce              # Start DCE service (main process)
+    console-monitor proxy <link_id>  # Start proxy for a specific port
+    console-monitor dte [tty] [baud] # Start DTE service
 """
 
 import os
@@ -29,9 +35,10 @@ import argparse
 import logging
 import threading
 import select
+import subprocess
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional, Callable, Dict
+from typing import Optional, Callable, Dict, Set
 
 from swsscommon.swsscommon import (
     DBConnector,
@@ -83,6 +90,12 @@ PROC_CMDLINE = "/proc/cmdline"
 
 # PTY symlink suffix
 PTY_SYMLINK_SUFFIX = "-PTS"
+
+# Proxy service retry interval
+PROXY_RETRY_INTERVAL = 3.0
+
+# Systemd service template name
+PROXY_SERVICE_TEMPLATE = "console-monitor-proxy@{}.service"
 
 
 # ============================================================
@@ -385,23 +398,6 @@ class FrameFilter:
 # Utility Functions
 # ============================================================
 
-def get_pty_symlink_prefix() -> str:
-    """Read PTY symlink prefix from udevprefix.conf"""
-    try:
-        from sonic_py_common import device_info
-        platform_path, _ = device_info.get_paths_to_platform_and_hwsku_dirs()
-        config_file = os.path.join(platform_path, "udevprefix.conf")
-        
-        if os.path.exists(config_file):
-            with open(config_file, 'r') as f:
-                prefix = f.readline().rstrip()
-                return f"/dev/{prefix}"
-    except Exception as e:
-        log.warning(f"Failed to read udevprefix.conf: {e}")
-    
-    return "/dev/C0-"
-
-
 def set_nonblocking(fd: int) -> None:
     """Set file descriptor to non-blocking mode"""
     flags = fcntl.fcntl(fd, fcntl.F_GETFL)
@@ -465,64 +461,155 @@ def parse_proc_cmdline() -> tuple[str, int]:
 
 
 # ============================================================
-# DCE Serial Proxy
+# DCE Proxy Service (runs as independent process)
 # ============================================================
 
-class SerialProxy:
+class ProxyService:
     """
-    Serial proxy: creates PTY and forwards serial data
+    Proxy service for a single serial port (runs as independent process)
     
-    Uses select for multiplexing, runs in a separate thread.
-    Each proxy has its own Redis connection to avoid multi-thread contention.
+    Startup flow:
+    1. Wait for udev prefix to be available (determines device path)
+    2. Wait for CONFIG_DB configuration to be ready
+    3. Wait for device symlink to exist
+    4. Initialize and run proxy main loop
+    
+    Does not listen for CONFIG_DB changes. Configuration changes are handled
+    by DCE service restarting this process via systemctl.
     """
     
-    def __init__(self, link_id: str, device: str, baud: int, pty_symlink_prefix: str):
+    def __init__(self, link_id: str):
         self.link_id = link_id
-        self.device = device
-        self.baud = baud
-        self.pty_symlink_prefix = pty_symlink_prefix
+        self.running = False
         
-        # Each proxy creates its own Redis connection to avoid multi-thread contention
+        # Configuration (obtained in phase 1)
+        self.baud: int = 0
+        self.device: str = ""
+        self.pty_symlink_prefix: str = ""
+        
+        # Proxy resources
         self.state_db: Optional[DBConnector] = None
         self.state_table: Optional[Table] = None
-        
         self.ser_fd: int = -1
         self.pty_master: int = -1
         self.pty_slave: int = -1
         self.pty_name: str = ""
         self.pty_symlink: str = ""
         self.filter: Optional[FrameFilter] = None
-        self.running: bool = False
         
         # State tracking
         self._current_oper_state: Optional[str] = None
         self._last_heartbeat_time: float = 0.0
         self._last_data_activity: float = 0.0
-        self._last_serial_data_time: float = 0.0  # For filter timeout detection
+        self._last_serial_data_time: float = 0.0
         
-        # Thread
-        self._thread: Optional[threading.Thread] = None
-        
-        # Pipe for waking up select
+        # Wakeup pipe for signal handling
         self._wake_r: int = -1
         self._wake_w: int = -1
     
-    def start(self) -> bool:
-        """Start proxy"""
+    def run(self) -> int:
+        """
+        Main entry point: execute four phases in sequence
+        
+        Returns:
+            Exit code
+        """
+        self.running = True
+        
+        # Phase 1: Wait for udev prefix to be available
+        if not self._wait_for_udev_prefix():
+            return EXIT_SERVICE_START_FAILED
+        
+        # Phase 2: Wait for configuration to be ready
+        if not self._wait_for_config():
+            return EXIT_SERVICE_START_FAILED
+        
+        # Phase 3: Wait for device to be ready
+        if not self._wait_for_device():
+            return EXIT_SERVICE_START_FAILED
+        
+        # Phase 4: Initialize and run proxy
+        if not self._initialize():
+            return EXIT_SERVICE_START_FAILED
+        
+        self._run_loop()
+        self._cleanup()
+        
+        return EXIT_SUCCESS
+    
+    def _wait_for_udev_prefix(self) -> bool:
+        """Phase 1: Wait for udev prefix to be available"""
+        log.info(f"[{self.link_id}] Waiting for udev prefix...")
+        
+        while self.running:
+            try:
+                from sonic_py_common import device_info
+                platform_path, _ = device_info.get_paths_to_platform_and_hwsku_dirs()
+                config_file = os.path.join(platform_path, "udevprefix.conf")
+                
+                if os.path.exists(config_file):
+                    with open(config_file, 'r') as f:
+                        prefix = f.readline().rstrip()
+                        if prefix:
+                            self.pty_symlink_prefix = f"/dev/{prefix}"
+                            self.device = f"/dev/{prefix}{self.link_id}"
+                            log.info(f"[{self.link_id}] Udev prefix loaded: {prefix}, device={self.device}")
+                            return True
+            except Exception as e:
+                log.warning(f"[{self.link_id}] Failed to read udevprefix.conf: {e}")
+            
+            log.debug(f"[{self.link_id}] Udev prefix not found, retrying in {PROXY_RETRY_INTERVAL}s...")
+            time.sleep(PROXY_RETRY_INTERVAL)
+        
+        return False
+    
+    def _wait_for_config(self) -> bool:
+        """Phase 2: Wait for CONFIG_DB configuration to be ready"""
+        log.info(f"[{self.link_id}] Waiting for CONFIG_DB config...")
+        
+        config_db = ConfigDBConnector()
+        config_db.connect(wait_for_init=True, retry_on=True)
+        
+        while self.running:
+            entry = config_db.get_entry(CONSOLE_PORT_TABLE, self.link_id)
+            if entry:
+                self.baud = int(entry.get('baud_rate', DEFAULT_BAUD))
+                log.info(f"[{self.link_id}] Config loaded: baud={self.baud}")
+                return True
+            
+            log.debug(f"[{self.link_id}] Config not found, retrying in {PROXY_RETRY_INTERVAL}s...")
+            time.sleep(PROXY_RETRY_INTERVAL)
+        
+        return False
+    
+    def _wait_for_device(self) -> bool:
+        """Phase 3: Wait for device symlink to exist"""
+        log.info(f"[{self.link_id}] Waiting for device {self.device}...")
+        
+        while self.running:
+            if os.path.exists(self.device):
+                log.info(f"[{self.link_id}] Device {self.device} is ready")
+                return True
+            
+            log.debug(f"[{self.link_id}] Device not found, retrying in {PROXY_RETRY_INTERVAL}s...")
+            time.sleep(PROXY_RETRY_INTERVAL)
+        
+        return False
+    
+    def _initialize(self) -> bool:
+        """Phase 4 init: open serial port, create PTY, connect to Redis"""
         try:
-            # Create independent Redis connection (one per proxy to avoid multi-thread contention)
+            # Connect to STATE_DB
             self.state_db = DBConnector("STATE_DB", 0)
             self.state_table = Table(self.state_db, CONSOLE_PORT_TABLE)
             
-            # Create wake-up pipe
+            # Create wakeup pipe for signal handling
             self._wake_r, self._wake_w = os.pipe()
             set_nonblocking(self._wake_r)
             
             # Create PTY
             self.pty_master, self.pty_slave = os.openpty()
             self.pty_name = os.ttyname(self.pty_slave)
-            
-            # Set PTY slave permissions to allow non-root access
             os.chmod(self.pty_name, 0o666)
             
             # Open serial port
@@ -541,79 +628,30 @@ class SerialProxy:
                 on_user_data=self._on_user_data_received,
             )
             
-            # Create symlink
+            # Create PTY symlink
             self._create_symlink()
             
-            self.running = True
             self._last_heartbeat_time = time.monotonic()
             self._last_data_activity = time.monotonic()
             
-            # Start worker thread
-            self._thread = threading.Thread(target=self._run_loop, daemon=True)
-            self._thread.start()
-            
-            log.info(f"[{self.link_id}] Started: {self.device} -> {self.pty_name} ({self.pty_symlink})")
+            log.info(f"[{self.link_id}] Initialized: {self.device} <-> {self.pty_name} ({self.pty_symlink})")
             return True
             
         except Exception as e:
-            log.error(f"[{self.link_id}] Failed to start: {e}")
-            self.stop()
+            log.error(f"[{self.link_id}] Failed to initialize: {e}")
             return False
     
-    def stop(self) -> None:
-        """Stop proxy"""
-        self.running = False
-        
-        # Wake up select loop
-        if self._wake_w >= 0:
-            try:
-                os.write(self._wake_w, b'x')
-            except:
-                pass
-        
-        # Wait for thread to finish
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
-        
-        # Cleanup STATE_DB state
-        self._cleanup_state()
-        
-        # Remove symlink
-        self._remove_symlink()
-        
-        # Flush remaining data
-        if self.filter and self.pty_master >= 0:
-            remaining = self.filter.flush()
-            if remaining:
-                try:
-                    os.write(self.pty_master, remaining)
-                except:
-                    pass
-        
-        # Close file descriptors
-        for fd in (self._wake_r, self._wake_w, self.ser_fd, self.pty_master, self.pty_slave):
-            if fd >= 0:
-                try:
-                    os.close(fd)
-                except:
-                    pass
-        
-        self._wake_r = self._wake_w = -1
-        self.ser_fd = self.pty_master = self.pty_slave = -1
-        
-        log.info(f"[{self.link_id}] Stopped")
-    
     def _run_loop(self) -> None:
-        """Worker thread main loop"""
+        """Phase 4 main loop: select() to handle serial and PTY data"""
         filter_timeout = self._calculate_filter_timeout(self.baud)
-
+        
         while self.running:
             try:
                 # Calculate select timeout
                 now = time.monotonic()
                 time_since_heartbeat = now - self._last_heartbeat_time
                 select_timeout = max(0.1, HEARTBEAT_TIMEOUT - time_since_heartbeat)
-
+                
                 # If filter has pending data, consider filter timeout
                 if self.filter and self.filter.has_pending_data():
                     time_since_serial = now - self._last_serial_data_time
@@ -621,19 +659,18 @@ class SerialProxy:
                     if remaining_filter_timeout > 0:
                         select_timeout = min(select_timeout, remaining_filter_timeout)
                     else:
-                        # Filter timeout reached, process immediately
                         select_timeout = 0
-
-                # Use select to monitor serial port, PTY, and wake-up pipe
+                
+                # Use select to monitor serial port, PTY, and wakeup pipe
                 readable, _, _ = select.select(
                     [self.ser_fd, self.pty_master, self._wake_r],
                     [], [],
                     select_timeout
                 )
-
+                
                 if not self.running:
                     break
-
+                
                 serial_data_received = False
                 for fd in readable:
                     if fd == self.ser_fd:
@@ -642,21 +679,21 @@ class SerialProxy:
                     elif fd == self.pty_master:
                         self._on_pty_read()
                     elif fd == self._wake_r:
-                        # Clear wake-up pipe
+                        # Clear wakeup pipe
                         try:
                             os.read(self._wake_r, 1024)
                         except:
                             pass
-
+                
                 # Check heartbeat timeout
                 self._check_heartbeat_timeout()
-
-                # Check filter timeout: only trigger when no new serial data received and timeout reached
+                
+                # Check filter timeout
                 if self.filter and self.filter.has_pending_data() and not serial_data_received:
                     now = time.monotonic()
                     if now - self._last_serial_data_time >= filter_timeout:
                         self.filter.on_timeout()
-
+                        
             except Exception as e:
                 if self.running:
                     log.error(f"[{self.link_id}] Loop error: {e}")
@@ -742,7 +779,6 @@ class SerialProxy:
     def _cleanup_state(self) -> None:
         """Cleanup STATE_DB state"""
         try:
-            # Only delete fields managed by console-monitor
             self.state_table.hdel(self.link_id, "oper_state")
             self.state_table.hdel(self.link_id, "last_state_change")
             log.info(f"[{self.link_id}] STATE_DB cleaned up")
@@ -772,6 +808,46 @@ class SerialProxy:
                 log.error(f"[{self.link_id}] Failed to remove symlink: {e}")
             self.pty_symlink = ""
     
+    def _cleanup(self) -> None:
+        """Cleanup all resources"""
+        # Cleanup STATE_DB
+        self._cleanup_state()
+        
+        # Remove symlink
+        self._remove_symlink()
+        
+        # Flush remaining data
+        if self.filter and self.pty_master >= 0:
+            remaining = self.filter.flush()
+            if remaining:
+                try:
+                    os.write(self.pty_master, remaining)
+                except:
+                    pass
+        
+        # Close file descriptors
+        for fd in (self._wake_r, self._wake_w, self.ser_fd, self.pty_master, self.pty_slave):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except:
+                    pass
+        
+        self._wake_r = self._wake_w = -1
+        self.ser_fd = self.pty_master = self.pty_slave = -1
+        log.info(f"[{self.link_id}] Cleanup complete")
+    
+    def stop(self) -> None:
+        """Stop service (signal handler)"""
+        self.running = False
+        
+        # Wake up select loop
+        if self._wake_w >= 0:
+            try:
+                os.write(self._wake_w, b'x')
+            except:
+                pass
+    
     @staticmethod
     def _calculate_filter_timeout(baud: int, multiplier: int = 3) -> float:
         """Calculate frame filter timeout based on baud rate"""
@@ -781,24 +857,27 @@ class SerialProxy:
 
 
 # ============================================================
-# DCE Service
+# DCE Service (main process - manages proxy services)
 # ============================================================
 
 class DCEService:
     """
-    DCE side service: manages multiple serial proxies
+    DCE side main service: manages proxy services via systemctl
     
     Uses ConfigDBConnector's subscribe/listen pattern to monitor CONFIG_DB changes,
     following SONiC daemon conventions.
-    Each SerialProxy has its own Redis connection to avoid multi-thread contention.
+    
+    This service does not directly manage SerialProxy objects. Instead, it manages
+    independent proxy processes via systemctl commands.
     """
     
     def __init__(self):
         self.config_db: Optional[ConfigDBConnector] = None
-        
-        self.proxies: Dict[str, SerialProxy] = {}
+        self.active_proxies: Set[str] = set()  # Currently active proxy link_ids
         self.running: bool = False
-        self.pty_symlink_prefix: str = ""
+        
+        # Cache for detecting configuration changes
+        self._config_cache: Dict[str, dict] = {}
     
     def start(self) -> bool:
         """Start service"""
@@ -807,10 +886,6 @@ class DCEService:
             self.config_db = ConfigDBConnector()
             self.config_db.connect(wait_for_init=True, retry_on=True)
             log.info("ConfigDB connected")
-            
-            # Read PTY symlink prefix
-            self.pty_symlink_prefix = get_pty_symlink_prefix()
-            log.info(f"PTY symlink prefix: {self.pty_symlink_prefix}")
             
             self.running = True
             log.info("DCE service initialized")
@@ -860,10 +935,10 @@ class DCEService:
         """Stop service"""
         self.running = False
         
-        # Stop all proxies
-        for proxy in self.proxies.values():
-            proxy.stop()
-        self.proxies.clear()
+        # Stop all proxy services
+        for link_id in list(self.active_proxies):
+            self._stop_proxy(link_id)
+        self.active_proxies.clear()
         
         log.info("DCE service stopped")
     
@@ -928,56 +1003,120 @@ class DCEService:
                 key_str = str(key) if not isinstance(key, str) else key
                 configs[key_str] = {
                     "baud": int(entry.get("baud_rate", 9600)),
-                    "device": f"/dev/C0-{key_str}",
                 }
         except Exception as e:
             log.error(f"Failed to get configs: {e}")
         return configs
     
     def _sync(self) -> None:
-        """Sync configuration and proxies"""
+        """Sync configuration and proxy services"""
         # Check if feature is enabled
         if not self._check_feature_enabled():
             # Feature not enabled, stop all proxies
-            if self.proxies:
+            if self.active_proxies:
                 log.info("Feature disabled, stopping all proxies")
-                for proxy in self.proxies.values():
-                    proxy.stop()
-                self.proxies.clear()
+                for link_id in list(self.active_proxies):
+                    self._stop_proxy(link_id)
+                self.active_proxies.clear()
+                self._config_cache.clear()
             return
         
         # Get configuration
         redis_configs = self._get_all_configs()
         redis_ids = set(redis_configs.keys())
-        current_ids = set(self.proxies.keys())
+        current_ids = self.active_proxies.copy()
         
-        # Remove proxies not in configuration
+        # Stop proxies not in configuration
         for link_id in current_ids - redis_ids:
-            self.proxies[link_id].stop()
-            del self.proxies[link_id]
+            self._stop_proxy(link_id)
+            self.active_proxies.discard(link_id)
+            self._config_cache.pop(link_id, None)
         
-        # Add new proxies
+        # Start new proxies
         for link_id in redis_ids - current_ids:
-            cfg = redis_configs[link_id]
-            proxy = SerialProxy(
-                link_id, cfg["device"], cfg["baud"], self.pty_symlink_prefix
-            )
-            if proxy.start():
-                self.proxies[link_id] = proxy
+            if self._start_proxy(link_id):
+                self.active_proxies.add(link_id)
+                self._config_cache[link_id] = redis_configs[link_id]
         
-        # Update proxies with changed configuration
+        # Restart proxies with changed configuration (e.g., baud rate)
         for link_id in redis_ids & current_ids:
-            cfg = redis_configs[link_id]
-            proxy = self.proxies[link_id]
-            if proxy.baud != cfg["baud"]:
-                proxy.stop()
-                new_proxy = SerialProxy(
-                    link_id, cfg["device"], cfg["baud"], self.pty_symlink_prefix
-                )
-                if new_proxy.start():
-                    self.proxies[link_id] = new_proxy
+            new_config = redis_configs[link_id]
+            old_config = self._config_cache.get(link_id, {})
+            if new_config != old_config:
+                log.info(f"[{link_id}] Config changed: {old_config} -> {new_config}")
+                self._restart_proxy(link_id)
+                self._config_cache[link_id] = new_config
         
-        log.info(f"Sync complete: {len(self.proxies)} proxies active")
+        log.info(f"Sync complete: {len(self.active_proxies)} proxies active")
+    
+    def _start_proxy(self, link_id: str) -> bool:
+        """Start a proxy service via systemctl"""
+        service_name = PROXY_SERVICE_TEMPLATE.format(link_id)
+        try:
+            result = subprocess.run(
+                ['systemctl', 'start', service_name],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                log.info(f"[{link_id}] Proxy service started")
+                return True
+            else:
+                log.error(f"[{link_id}] Failed to start proxy service: {result.stderr}")
+                return False
+        except subprocess.TimeoutExpired:
+            log.error(f"[{link_id}] Timeout starting proxy service")
+            return False
+        except Exception as e:
+            log.error(f"[{link_id}] Error starting proxy service: {e}")
+            return False
+    
+    def _stop_proxy(self, link_id: str) -> bool:
+        """Stop a proxy service via systemctl"""
+        service_name = PROXY_SERVICE_TEMPLATE.format(link_id)
+        try:
+            result = subprocess.run(
+                ['systemctl', 'stop', service_name],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                log.info(f"[{link_id}] Proxy service stopped")
+                return True
+            else:
+                log.error(f"[{link_id}] Failed to stop proxy service: {result.stderr}")
+                return False
+        except subprocess.TimeoutExpired:
+            log.error(f"[{link_id}] Timeout stopping proxy service")
+            return False
+        except Exception as e:
+            log.error(f"[{link_id}] Error stopping proxy service: {e}")
+            return False
+    
+    def _restart_proxy(self, link_id: str) -> bool:
+        """Restart a proxy service via systemctl"""
+        service_name = PROXY_SERVICE_TEMPLATE.format(link_id)
+        try:
+            result = subprocess.run(
+                ['systemctl', 'restart', service_name],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                log.info(f"[{link_id}] Proxy service restarted")
+                return True
+            else:
+                log.error(f"[{link_id}] Failed to restart proxy service: {result.stderr}")
+                return False
+        except subprocess.TimeoutExpired:
+            log.error(f"[{link_id}] Timeout restarting proxy service")
+            return False
+        except Exception as e:
+            log.error(f"[{link_id}] Error restarting proxy service: {e}")
+            return False
 
 
 # ============================================================
@@ -1164,7 +1303,7 @@ def signal_handler(signum, frame):
 
 
 def run_dce() -> int:
-    """DCE service entry point"""
+    """DCE service entry point (main process)"""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGHUP, signal_handler)
@@ -1183,6 +1322,21 @@ def run_dce() -> int:
         service.stop()
     
     return EXIT_SUCCESS
+
+
+def run_proxy(link_id: str) -> int:
+    """Proxy service entry point (per-port process)"""
+    service = ProxyService(link_id)
+    
+    def proxy_signal_handler(signum, frame):
+        log.info(f"[{link_id}] Received signal {signum}")
+        service.stop()
+    
+    signal.signal(signal.SIGINT, proxy_signal_handler)
+    signal.signal(signal.SIGTERM, proxy_signal_handler)
+    signal.signal(signal.SIGHUP, proxy_signal_handler)
+    
+    return service.run()
 
 
 def run_dte() -> int:
@@ -1229,25 +1383,34 @@ def main():
     Unified entry point: determines run mode based on command line arguments
     
     Usage:
-        console-monitor dce    # Run DCE service
-        console-monitor dte    # Run DTE service
+        console-monitor dce              # Run DCE service (main process)
+        console-monitor proxy <link_id>  # Run proxy for specific port
+        console-monitor dte [tty] [baud] # Run DTE service
     """
     if len(sys.argv) < 2:
-        print("Usage: console-monitor <dce|dte> [args...]")
-        print("  dce: Run DCE (Console Server) service")
-        print("  dte: Run DTE (SONiC Switch) service")
+        print("Usage: console-monitor <dce|proxy|dte> [args...]")
+        print("  dce:              Run DCE (Console Server) main service")
+        print("  proxy <link_id>:  Run proxy for a specific serial port")
+        print("  dte [tty] [baud]: Run DTE (SONiC Switch) service")
         sys.exit(EXIT_INVALID_MODE)
     
     mode = sys.argv[1].lower()
-    sys.argv = sys.argv[1:]  # Remove mode argument for subsequent argparse processing
     
     if mode == "dce":
+        sys.argv = sys.argv[1:]  # Remove mode argument
         sys.exit(run_dce())
+    elif mode == "proxy":
+        if len(sys.argv) < 3:
+            print("Usage: console-monitor proxy <link_id>")
+            sys.exit(EXIT_INVALID_MODE)
+        link_id = sys.argv[2]
+        sys.exit(run_proxy(link_id))
     elif mode == "dte":
+        sys.argv = sys.argv[1:]  # Remove mode argument for argparse
         sys.exit(run_dte())
     else:
         print(f"Unknown mode: {mode}")
-        print("Use 'dce' or 'dte'")
+        print("Use 'dce', 'proxy', or 'dte'")
         sys.exit(EXIT_INVALID_MODE)
 
 
