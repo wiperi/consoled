@@ -1,0 +1,13 @@
+[Unit]
+Description=Console Monitor Proxy for port %i
+Documentation=https://github.com/sonic-net/SONiC/blob/master/doc/console/Console-Monitor-High-Level-Design.md
+After=database.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/console-monitor proxy %i
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
