@@ -5,14 +5,14 @@ repos:
       - id: flake8
         args: ['--max-line-length=120']
 
-  - repo: local
-    hooks:
-      - id: sync-downstream
-        name: Sync downstream repositories
-        entry: ./sync_downstream.sh
-        language: system
-        pass_filenames: false
-        always_run: true
+  # - repo: local
+  #   hooks:
+  #     - id: sync-downstream
+  #       name: Sync downstream repositories
+  #       entry: ./sync_downstream.sh
+  #       language: system
+  #       pass_filenames: false
+  #       always_run: true
 
   # - repo: local
   #   hooks:
