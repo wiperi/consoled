@@ -112,6 +112,9 @@ EXIT_INVALID_MODE = 3
 PROXY_SERVICE_TEMPLATE = "console-monitor-proxy@{}.service"
 PTY_BRIDGE_SERVICE_TEMPLATE = "console-monitor-pty-bridge@{}.service"
 
+# Default udev prefix (used when udevprefix.conf is not available)
+DEFAULT_UDEV_PREFIX = "ttyUSB"
+
 
 # ============================================================
 # Frame Protocol Constants and Classes
@@ -393,12 +396,12 @@ class FrameFilter:
 # Utility Functions
 # ============================================================
 
-def get_udev_prefix() -> Optional[str]:
+def get_udev_prefix() -> str:
     """
     Read udev prefix from udevprefix.conf
 
     Returns:
-        Prefix string (e.g., "C0-") or None if not available
+        Prefix string (e.g., "C0-") or DEFAULT_UDEV_PREFIX if not available
     """
     try:
         from sonic_py_common import device_info
@@ -409,35 +412,13 @@ def get_udev_prefix() -> Optional[str]:
             with open(config_file, 'r') as f:
                 prefix = f.readline().rstrip()
                 if prefix:
+                    log.info(f"Udev prefix loaded from config: {prefix}")
                     return prefix
     except Exception as e:
         log.warning(f"Failed to read udevprefix.conf: {e}")
 
-    return None
-
-
-def wait_for_udev_prefix(running_flag: Callable[[], bool]) -> Optional[str]:
-    """
-    Wait for udev prefix to be available (infinite wait)
-
-    Args:
-        running_flag: Callable that returns False to stop waiting
-
-    Returns:
-        Prefix string or None if stopped
-    """
-    log.info("Waiting for udev prefix...")
-
-    while running_flag():
-        prefix = get_udev_prefix()
-        if prefix:
-            log.info(f"Udev prefix loaded: {prefix}")
-            return prefix
-
-        log.debug(f"Udev prefix not found, retrying in {RETRY_INTERVAL}s...")
-        time.sleep(RETRY_INTERVAL)
-
-    return None
+    log.info(f"Using default udev prefix: {DEFAULT_UDEV_PREFIX}")
+    return DEFAULT_UDEV_PREFIX
 
 
 def set_nonblocking(fd: int) -> None:
@@ -517,7 +498,7 @@ def run_pty_bridge(link_id: str) -> int:
     PTY Bridge entry point (runs as independent process)
 
     This function:
-    1. Waits for udev prefix to be available
+    1. Gets udev prefix (uses default if not available)
     2. Executes socat to create a PTY pair, replacing current process
 
     The socat command creates two linked PTY devices:
@@ -526,11 +507,8 @@ def run_pty_bridge(link_id: str) -> int:
     """
     log.info(f"[PTYBridge:{link_id}] Starting...")
 
-    # Phase 1: Wait for udev prefix
-    prefix = wait_for_udev_prefix(lambda: True)
-    if not prefix:
-        log.error(f"[PTYBridge:{link_id}] Failed to get udev prefix")
-        return EXIT_SERVICE_START_FAILED
+    # Get udev prefix
+    prefix = get_udev_prefix()
 
     # Build PTY symlink paths
     pts_path = f"/dev/{prefix}{link_id}{PTY_SYMLINK_SUFFIX_PTS}"
@@ -614,8 +592,8 @@ class ProxyService:
         """
         self.running = True
 
-        # Phase 1: Wait for udev prefix
-        if not self._wait_for_udev_prefix():
+        # Phase 1: Get udev prefix
+        if not self._get_udev_prefix():
             return EXIT_SERVICE_START_FAILED
 
         # Phase 2: Wait for configuration
@@ -639,22 +617,15 @@ class ProxyService:
 
         return EXIT_SUCCESS
 
-    def _wait_for_udev_prefix(self) -> bool:
-        """Phase 1: Wait for udev prefix"""
-        log.info(f"[{self.link_id}] Phase 1: Waiting for udev prefix...")
+    def _get_udev_prefix(self) -> bool:
+        """Phase 1: Get udev prefix"""
+        log.info(f"[{self.link_id}] Phase 1: Getting udev prefix...")
 
-        while self.running:
-            prefix = get_udev_prefix()
-            if prefix:
-                self.device_path = f"/dev/{prefix}{self.link_id}"
-                self.ptm_path = f"/dev/{prefix}{self.link_id}{PTY_SYMLINK_SUFFIX_PTM}"
-                log.info(f"[{self.link_id}] Udev prefix loaded: {prefix}, device={self.device_path}")
-                return True
-
-            log.debug(f"[{self.link_id}] Udev prefix not found, retrying in {RETRY_INTERVAL}s...")
-            time.sleep(RETRY_INTERVAL)
-
-        return False
+        prefix = get_udev_prefix()
+        self.device_path = f"/dev/{prefix}{self.link_id}"
+        self.ptm_path = f"/dev/{prefix}{self.link_id}{PTY_SYMLINK_SUFFIX_PTM}"
+        log.info(f"[{self.link_id}] Udev prefix: {prefix}, device={self.device_path}")
+        return True
 
     def _wait_for_config(self) -> bool:
         """Phase 2: Wait for CONFIG_DB configuration"""
