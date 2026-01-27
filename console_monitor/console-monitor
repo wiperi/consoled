@@ -39,12 +39,29 @@ from swsscommon.swsscommon import (
 # Logging Configuration
 # ============================================================
 
+# Log level mapping
+LOG_LEVEL_MAP = {
+    'debug': logging.DEBUG,
+    'info': logging.INFO,
+    'warning': logging.WARNING,
+    'error': logging.ERROR,
+    'critical': logging.CRITICAL,
+}
+
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 log = logging.getLogger("console-monitor")
+
+
+def set_log_level(level_str: str) -> None:
+    """Set logging level from string"""
+    level = LOG_LEVEL_MAP.get(level_str.lower(), logging.INFO)
+    logging.getLogger().setLevel(level)
+    log.setLevel(level)
+    log.info(f"Log level set to {level_str.upper()}")
 
 
 # ============================================================
@@ -1517,20 +1534,14 @@ def run_dce() -> int:
     return EXIT_SUCCESS
 
 
-def run_dte() -> int:
+def run_dte(tty_name: Optional[str], baud: Optional[int]) -> int:
     """DTE service entry point"""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGHUP, signal_handler)
 
-    parser = argparse.ArgumentParser(description='Console Monitor DTE Service')
-    parser.add_argument('tty_name', nargs='?', default=None, help='TTY device name')
-    parser.add_argument('baud', nargs='?', type=int, default=None, help='Baud rate')
-    args = parser.parse_args()
-
-    if args.tty_name:
-        tty_name = args.tty_name
-        baud = args.baud if args.baud else DEFAULT_BAUD
+    if tty_name:
+        baud = baud if baud else DEFAULT_BAUD
         log.info(f"DTE: Using command line args: tty={tty_name}, baud={baud}")
     else:
         try:
@@ -1560,30 +1571,61 @@ def main():
     Unified entry point
 
     Usage:
-        console-monitor ptyhub   # Run PTY Hub service
-        console-monitor dce      # Run DCE service
-        console-monitor dte      # Run DTE service
+        console-monitor ptyhub [-l debug]     # Run PTY Hub service
+        console-monitor dce [-l debug]        # Run DCE service
+        console-monitor dte [-l debug] [tty] [baud]  # Run DTE service
     """
-    if len(sys.argv) < 2:
-        print("Usage: console-monitor <ptyhub|dce|dte> [args...]")
-        print("  ptyhub: Run PTY Hub service (creates PTY bridges)")
-        print("  dce: Run DCE (Console Server) service")
-        print("  dte: Run DTE (SONiC Switch) service")
+    # Create main parser with subcommands
+    parser = argparse.ArgumentParser(
+        description='Console Monitor Service',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  console-monitor ptyhub              # Run PTY Hub service
+  console-monitor dce -l debug        # Run DCE service with debug logging
+  console-monitor dte                 # Run DTE service (auto-detect from /proc/cmdline)
+  console-monitor dte -l debug ttyS0 9600  # Run DTE service with specified TTY
+'''
+    )
+
+    subparsers = parser.add_subparsers(dest='mode', help='Service mode')
+
+    # PTY Hub subcommand
+    ptyhub_parser = subparsers.add_parser('ptyhub', help='Run PTY Hub service (creates PTY bridges)')
+    ptyhub_parser.add_argument('-l', '--log-level',
+                               choices=['debug', 'info', 'warning', 'error', 'critical'],
+                               default='info', help='Set log level (default: info)')
+
+    # DCE subcommand
+    dce_parser = subparsers.add_parser('dce', help='Run DCE (Console Server) service')
+    dce_parser.add_argument('-l', '--log-level',
+                            choices=['debug', 'info', 'warning', 'error', 'critical'],
+                            default='info', help='Set log level (default: info)')
+
+    # DTE subcommand
+    dte_parser = subparsers.add_parser('dte', help='Run DTE (SONiC Switch) service')
+    dte_parser.add_argument('-l', '--log-level',
+                            choices=['debug', 'info', 'warning', 'error', 'critical'],
+                            default='info', help='Set log level (default: info)')
+    dte_parser.add_argument('tty_name', nargs='?', default=None, help='TTY device name')
+    dte_parser.add_argument('baud', nargs='?', type=int, default=None, help='Baud rate')
+
+    args = parser.parse_args()
+
+    if not args.mode:
+        parser.print_help()
         sys.exit(EXIT_INVALID_MODE)
 
-    mode = sys.argv[1].lower()
-    sys.argv = sys.argv[1:]  # Remove mode argument for argparse
+    # Set log level
+    set_log_level(args.log_level)
 
-    if mode == "ptyhub":
+    # Dispatch to appropriate service
+    if args.mode == "ptyhub":
         sys.exit(run_ptyhub())
-    elif mode == "dce":
+    elif args.mode == "dce":
         sys.exit(run_dce())
-    elif mode == "dte":
-        sys.exit(run_dte())
-    else:
-        print(f"Unknown mode: {mode}")
-        print("Use 'ptyhub', 'dce' or 'dte'")
-        sys.exit(EXIT_INVALID_MODE)
+    elif args.mode == "dte":
+        sys.exit(run_dte(args.tty_name, args.baud))
 
 
 if __name__ == "__main__":
