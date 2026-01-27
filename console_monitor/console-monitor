@@ -3,16 +3,16 @@
 Console Monitor Service
 
 Unified Console Monitor service with four modes:
-- ptyhub: PTY Hub service that creates PTY pairs and bridges them
-- dce: DCE service that manages proxy processes via systemctl
+- pty-bridge: PTY Bridge service that creates a PTY pair using socat
+- dce: DCE service that manages pty-bridge and proxy processes via systemctl
 - proxy: Proxy service for a single serial port (runs as independent process)
 - dte: DTE service that sends heartbeat frames
 
 Usage:
-    console-monitor ptyhub           # Start PTY Hub service
-    console-monitor dce              # Start DCE service
-    console-monitor proxy <link_id>  # Start proxy for a specific port
-    console-monitor dte [tty] [baud] # Start DTE service
+    console-monitor pty-bridge <link_id>  # Start PTY bridge for a specific port
+    console-monitor dce                   # Start DCE service
+    console-monitor proxy <link_id>       # Start proxy for a specific port
+    console-monitor dte [tty] [baud]      # Start DTE service
 """
 
 import os
@@ -108,8 +108,9 @@ EXIT_SERVICE_START_FAILED = 1
 EXIT_SERIAL_CONFIG_ERROR = 2
 EXIT_INVALID_MODE = 3
 
-# Systemd service template name
+# Systemd service template names
 PROXY_SERVICE_TEMPLATE = "console-monitor-proxy@{}.service"
+PTY_BRIDGE_SERVICE_TEMPLATE = "console-monitor-pty-bridge@{}.service"
 
 
 # ============================================================
@@ -508,309 +509,55 @@ def calculate_filter_timeout(baud: int, multiplier: int = 3) -> float:
 
 
 # ============================================================
-# PTY Bridge (Single Link)
+# PTY Bridge (runs as independent process, exec socat)
 # ============================================================
 
-class PTYBridge:
+def run_pty_bridge(link_id: str) -> int:
     """
-    PTY Bridge for a single console link
+    PTY Bridge entry point (runs as independent process)
 
-    Creates two PTY pairs and bridges their masters:
-    - PTS: /dev/{prefix}{link_id}-PTS  (for user applications like picocom)
-    - PTM: /dev/{prefix}{link_id}-PTM  (for SerialProxy)
+    This function:
+    1. Waits for udev prefix to be available
+    2. Executes socat to create a PTY pair, replacing current process
 
-    Data flow:
-    picocom <-> PTS_slave <-> PTS_master <--bridge--> PTM_master <-> PTM_slave <-> SerialProxy
+    The socat command creates two linked PTY devices:
+    - /dev/{prefix}{link_id}-PTS (for user applications like picocom)
+    - /dev/{prefix}{link_id}-PTM (for SerialProxy)
     """
+    log.info(f"[PTYBridge:{link_id}] Starting...")
 
-    def __init__(self, link_id: str, udev_prefix: str):
-        self.link_id = link_id
-        self.udev_prefix = udev_prefix
+    # Phase 1: Wait for udev prefix
+    prefix = wait_for_udev_prefix(lambda: True)
+    if not prefix:
+        log.error(f"[PTYBridge:{link_id}] Failed to get udev prefix")
+        return EXIT_SERVICE_START_FAILED
 
-        # PTY pair 1 (for user applications)
-        self.pts_master: int = -1
-        self.pts_slave: int = -1
-        self.pts_symlink: str = ""
+    # Build PTY symlink paths
+    pts_path = f"/dev/{prefix}{link_id}{PTY_SYMLINK_SUFFIX_PTS}"
+    ptm_path = f"/dev/{prefix}{link_id}{PTY_SYMLINK_SUFFIX_PTM}"
 
-        # PTY pair 2 (for SerialProxy)
-        self.ptm_master: int = -1
-        self.ptm_slave: int = -1
-        self.ptm_symlink: str = ""
+    log.info(f"[PTYBridge:{link_id}] Creating PTY pair: {pts_path} <-> {ptm_path}")
 
-        # Bridge thread
-        self.running: bool = False
-        self._thread: Optional[threading.Thread] = None
-        self._wake_r: int = -1
-        self._wake_w: int = -1
+    # Build socat command
+    # socat creates two linked PTYs with symlinks
+    socat_args = [
+        'socat',
+        '-d', '-d',  # Debug output
+        f'PTY,raw,echo=0,link={pts_path},mode=666',
+        f'PTY,raw,echo=0,link={ptm_path},mode=666',
+    ]
 
-    def start(self) -> bool:
-        """
-        Start PTY bridge
+    log.info(f"[PTYBridge:{link_id}] Exec: {' '.join(socat_args)}")
 
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Create wake-up pipe
-            self._wake_r, self._wake_w = os.pipe()
-            set_nonblocking(self._wake_r)
+    # Replace current process with socat
+    try:
+        os.execvp('socat', socat_args)
+    except Exception as e:
+        log.error(f"[PTYBridge:{link_id}] Failed to exec socat: {e}")
+        return EXIT_SERVICE_START_FAILED
 
-            # Create PTY pair 1 (PTS - for user applications)
-            self.pts_master, self.pts_slave = os.openpty()
-            pts_slave_name = os.ttyname(self.pts_slave)
-            os.chmod(pts_slave_name, 0o666)
-            configure_pty(self.pts_master)
-            set_nonblocking(self.pts_master)
-
-            # Create PTY pair 2 (PTM - for SerialProxy)
-            self.ptm_master, self.ptm_slave = os.openpty()
-            ptm_slave_name = os.ttyname(self.ptm_slave)
-            os.chmod(ptm_slave_name, 0o666)
-            configure_pty(self.ptm_master)
-            set_nonblocking(self.ptm_master)
-
-            # Create symlinks
-            self.pts_symlink = f"/dev/{self.udev_prefix}{self.link_id}{PTY_SYMLINK_SUFFIX_PTS}"
-            self.ptm_symlink = f"/dev/{self.udev_prefix}{self.link_id}{PTY_SYMLINK_SUFFIX_PTM}"
-
-            self._create_symlink(self.pts_symlink, pts_slave_name)
-            self._create_symlink(self.ptm_symlink, ptm_slave_name)
-
-            # Start bridge thread
-            self.running = True
-            self._thread = threading.Thread(target=self._bridge_loop, daemon=True)
-            self._thread.start()
-
-            log.info(f"[PTYBridge:{self.link_id}] Started: {self.pts_symlink} <-> {self.ptm_symlink}")
-            return True
-
-        except Exception as e:
-            log.error(f"[PTYBridge:{self.link_id}] Failed to start: {e}")
-            self.stop()
-            return False
-
-    def stop(self) -> None:
-        """Stop PTY bridge and cleanup resources"""
-        self.running = False
-
-        # Wake up bridge thread
-        if self._wake_w >= 0:
-            try:
-                os.write(self._wake_w, b'x')
-            except Exception:
-                pass
-
-        # Wait for thread
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
-
-        # Remove symlinks
-        self._remove_symlink(self.pts_symlink)
-        self._remove_symlink(self.ptm_symlink)
-        self.pts_symlink = ""
-        self.ptm_symlink = ""
-
-        # Close file descriptors
-        for fd in (self._wake_r, self._wake_w, self.pts_master, self.pts_slave,
-                   self.ptm_master, self.ptm_slave):
-            if fd >= 0:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-
-        self._wake_r = self._wake_w = -1
-        self.pts_master = self.pts_slave = -1
-        self.ptm_master = self.ptm_slave = -1
-
-        log.info(f"[PTYBridge:{self.link_id}] Stopped")
-
-    def _bridge_loop(self) -> None:
-        """Bridge loop: forward data between two PTY masters"""
-        while self.running:
-            try:
-                readable, _, _ = select.select(
-                    [self.pts_master, self.ptm_master, self._wake_r],
-                    [], [],
-                    1.0
-                )
-
-                if not self.running:
-                    break
-
-                for fd in readable:
-                    if fd == self.pts_master:
-                        # PTS -> PTM
-                        try:
-                            data = os.read(self.pts_master, 4096)
-                            if data:
-                                os.write(self.ptm_master, data)
-                        except (BlockingIOError, OSError):
-                            pass
-                    elif fd == self.ptm_master:
-                        # PTM -> PTS
-                        try:
-                            data = os.read(self.ptm_master, 4096)
-                            if data:
-                                os.write(self.pts_master, data)
-                        except (BlockingIOError, OSError):
-                            pass
-                    elif fd == self._wake_r:
-                        # Wake-up signal
-                        try:
-                            os.read(self._wake_r, 1024)
-                        except OSError:
-                            pass
-
-            except Exception as e:
-                if self.running:
-                    log.error(f"[PTYBridge:{self.link_id}] Bridge error: {e}")
-                    time.sleep(0.1)
-
-    def _create_symlink(self, symlink_path: str, target: str) -> None:
-        """Create symlink"""
-        try:
-            if os.path.islink(symlink_path) or os.path.exists(symlink_path):
-                os.unlink(symlink_path)
-            os.symlink(target, symlink_path)
-            log.debug(f"[PTYBridge:{self.link_id}] Symlink: {symlink_path} -> {target}")
-        except Exception as e:
-            log.error(f"[PTYBridge:{self.link_id}] Failed to create symlink {symlink_path}: {e}")
-            raise
-
-    def _remove_symlink(self, symlink_path: str) -> None:
-        """Remove symlink"""
-        if symlink_path:
-            try:
-                if os.path.islink(symlink_path):
-                    os.unlink(symlink_path)
-                    log.debug(f"[PTYBridge:{self.link_id}] Symlink removed: {symlink_path}")
-            except Exception as e:
-                log.error(f"[PTYBridge:{self.link_id}] Failed to remove symlink {symlink_path}: {e}")
-
-
-# ============================================================
-# PTY Hub Service
-# ============================================================
-
-class PTYHub:
-    """
-    PTY Hub Service: manages multiple PTY bridges
-
-    Listens to CONFIG_DB and dynamically creates/removes PTY bridges
-    for each console link.
-    """
-
-    def __init__(self):
-        self.config_db: Optional[ConfigDBConnector] = None
-        self.udev_prefix: str = ""
-        self.bridges: Dict[str, PTYBridge] = {}
-        self.running: bool = False
-
-    def start(self) -> bool:
-        """Start PTY Hub service"""
-        self.running = True
-
-        # Phase 1: Wait for udev prefix (infinite wait)
-        prefix = wait_for_udev_prefix(lambda: self.running)
-        if not prefix:
-            return False
-        self.udev_prefix = prefix
-
-        # Phase 2: Connect to CONFIG_DB
-        try:
-            self.config_db = ConfigDBConnector()
-            self.config_db.connect(wait_for_init=True, retry_on=True)
-            log.info("PTYHub: ConfigDB connected")
-        except Exception as e:
-            log.error(f"PTYHub: Failed to connect to ConfigDB: {e}")
-            return False
-
-        return True
-
-    def register_callbacks(self) -> None:
-        """Register CONFIG_DB change callbacks"""
-
-        def make_callback(func):
-            def callback(table, key, data):
-                if data is None:
-                    op = "DEL"
-                    data = {}
-                else:
-                    op = "SET"
-                return func(key, op, data)
-            return callback
-
-        self.config_db.subscribe(CONSOLE_PORT_TABLE,
-                                 make_callback(self.console_port_handler))
-
-        log.info("PTYHub: Callbacks registered")
-
-    def run(self) -> None:
-        """Main loop: listen for CONFIG_DB changes"""
-        try:
-            self.config_db.listen(init_data_handler=self._load_initial_config)
-        except KeyboardInterrupt:
-            log.info("PTYHub: Received keyboard interrupt")
-        except Exception as e:
-            if self.running:
-                log.error(f"PTYHub: Listen error: {e}")
-
-    def stop(self) -> None:
-        """Stop PTY Hub service"""
-        self.running = False
-
-        # Stop all bridges
-        for bridge in self.bridges.values():
-            bridge.stop()
-        self.bridges.clear()
-
-        log.info("PTYHub: Stopped")
-
-    def _load_initial_config(self, init_data: dict) -> None:
-        """Load initial configuration"""
-        log.info(f"PTYHub: Loading initial config: {list(init_data.keys())}")
-        self._sync()
-
-    def console_port_handler(self, key: str, op: str, data: dict) -> None:
-        """CONSOLE_PORT table change handler"""
-        log.info(f"PTYHub: CONSOLE_PORT change: key={key}, op={op}")
-        self._sync()
-
-    def _get_all_link_ids(self) -> Set[str]:
-        """Get all link IDs from CONFIG_DB"""
-        link_ids = set()
-        try:
-            table_data = self.config_db.get_table(CONSOLE_PORT_TABLE)
-            for key in table_data.keys():
-                key_str = str(key) if not isinstance(key, str) else key
-                link_ids.add(key_str)
-        except Exception as e:
-            log.error(f"PTYHub: Failed to get link IDs: {e}")
-        return link_ids
-
-    def _sync(self) -> None:
-        """Sync bridges with CONFIG_DB"""
-        config_ids = self._get_all_link_ids()
-        current_ids = set(self.bridges.keys())
-
-        # Remove bridges not in config
-        for link_id in current_ids - config_ids:
-            log.info(f"PTYHub: Removing bridge for link {link_id}")
-            self.bridges[link_id].stop()
-            del self.bridges[link_id]
-
-        # Add new bridges
-        for link_id in config_ids - current_ids:
-            log.info(f"PTYHub: Creating bridge for link {link_id}")
-            bridge = PTYBridge(link_id, self.udev_prefix)
-            if bridge.start():
-                self.bridges[link_id] = bridge
-            else:
-                # Failed to create this bridge, but don't affect others
-                log.error(f"PTYHub: Failed to create bridge for link {link_id}, skipping")
-
-        log.info(f"PTYHub: Sync complete, {len(self.bridges)} bridges active")
+    # Should never reach here
+    return EXIT_SERVICE_START_FAILED
 
 
 # ============================================================
@@ -1174,23 +921,25 @@ class ProxyService:
 
 
 # ============================================================
-# DCE Service (manages proxy services via systemctl)
+# DCE Service (manages pty-bridge and proxy services via systemctl)
 # ============================================================
 
 class DCEService:
     """
-    DCE side main service: manages proxy services via systemctl
+    DCE side main service: manages pty-bridge and proxy services via systemctl
 
     Uses ConfigDBConnector's subscribe/listen pattern to monitor CONFIG_DB changes,
     following SONiC daemon conventions.
 
-    This service does not directly manage proxy processes. Instead, it manages
-    independent proxy processes via systemctl commands.
+    Service management order:
+    - Start: pty-bridge first, then proxy
+    - Stop: proxy first, then pty-bridge
+    - Restart: stop both, then start both
     """
 
     def __init__(self):
         self.config_db: Optional[ConfigDBConnector] = None
-        self.active_proxies: Set[str] = set()  # Currently active proxy link_ids
+        self.active_links: Set[str] = set()  # Currently active link_ids
         self.running: bool = False
 
         # Cache for detecting configuration changes
@@ -1244,10 +993,10 @@ class DCEService:
         """Stop service"""
         self.running = False
 
-        # Stop all proxy services
-        for link_id in list(self.active_proxies):
-            self._stop_proxy(link_id)
-        self.active_proxies.clear()
+        # Stop all services (proxy first, then pty-bridge)
+        for link_id in list(self.active_links):
+            self._stop_link(link_id)
+        self.active_links.clear()
 
         log.info("DCE: Stopped")
 
@@ -1294,44 +1043,139 @@ class DCEService:
         return configs
 
     def _sync(self) -> None:
-        """Sync proxy services with CONFIG_DB"""
+        """Sync services with CONFIG_DB"""
         # Check if feature is enabled
         if not self._check_feature_enabled():
-            if self.active_proxies:
-                log.info("DCE: Feature disabled, stopping all proxies")
-                for link_id in list(self.active_proxies):
-                    self._stop_proxy(link_id)
-                self.active_proxies.clear()
+            if self.active_links:
+                log.info("DCE: Feature disabled, stopping all services")
+                for link_id in list(self.active_links):
+                    self._stop_link(link_id)
+                self.active_links.clear()
                 self._config_cache.clear()
             return
 
         # Get configuration
         redis_configs = self._get_all_configs()
         redis_ids = set(redis_configs.keys())
-        current_ids = self.active_proxies.copy()
+        current_ids = self.active_links.copy()
 
-        # Stop proxies not in configuration
+        # Stop links not in configuration
         for link_id in current_ids - redis_ids:
-            self._stop_proxy(link_id)
-            self.active_proxies.discard(link_id)
+            self._stop_link(link_id)
+            self.active_links.discard(link_id)
             self._config_cache.pop(link_id, None)
 
-        # Start new proxies
+        # Start new links
         for link_id in redis_ids - current_ids:
-            if self._start_proxy(link_id):
-                self.active_proxies.add(link_id)
+            if self._start_link(link_id):
+                self.active_links.add(link_id)
                 self._config_cache[link_id] = redis_configs[link_id]
 
-        # Restart proxies with changed configuration (e.g., baud rate)
+        # Restart links with changed configuration (e.g., baud rate)
         for link_id in redis_ids & current_ids:
             new_config = redis_configs[link_id]
             old_config = self._config_cache.get(link_id, {})
             if new_config != old_config:
                 log.info(f"DCE: [{link_id}] Config changed: {old_config} -> {new_config}")
-                self._restart_proxy(link_id)
+                self._restart_link(link_id)
                 self._config_cache[link_id] = new_config
 
-        log.info(f"DCE: Sync complete, {len(self.active_proxies)} proxies active")
+        log.info(f"DCE: Sync complete, {len(self.active_links)} links active")
+
+    def _start_link(self, link_id: str) -> bool:
+        """Start pty-bridge and proxy for a link (pty-bridge first, then proxy)"""
+        log.info(f"DCE: [{link_id}] Starting services...")
+
+        # Start pty-bridge first
+        if not self._start_pty_bridge(link_id):
+            log.error(f"DCE: [{link_id}] Failed to start pty-bridge")
+            return False
+
+        # Then start proxy
+        if not self._start_proxy(link_id):
+            log.error(f"DCE: [{link_id}] Failed to start proxy, stopping pty-bridge")
+            self._stop_pty_bridge(link_id)
+            return False
+
+        log.info(f"DCE: [{link_id}] All services started")
+        return True
+
+    def _stop_link(self, link_id: str) -> bool:
+        """Stop proxy and pty-bridge for a link (proxy first, then pty-bridge)"""
+        log.info(f"DCE: [{link_id}] Stopping services...")
+
+        # Stop proxy first
+        self._stop_proxy(link_id)
+
+        # Then stop pty-bridge
+        self._stop_pty_bridge(link_id)
+
+        log.info(f"DCE: [{link_id}] All services stopped")
+        return True
+
+    def _restart_link(self, link_id: str) -> bool:
+        """Restart all services for a link"""
+        log.info(f"DCE: [{link_id}] Restarting services...")
+
+        # Stop both (proxy first, then pty-bridge)
+        self._stop_proxy(link_id)
+        self._stop_pty_bridge(link_id)
+
+        # Start both (pty-bridge first, then proxy)
+        if not self._start_pty_bridge(link_id):
+            return False
+        if not self._start_proxy(link_id):
+            self._stop_pty_bridge(link_id)
+            return False
+
+        log.info(f"DCE: [{link_id}] All services restarted")
+        return True
+
+    def _start_pty_bridge(self, link_id: str) -> bool:
+        """Start a pty-bridge service via systemctl"""
+        service_name = PTY_BRIDGE_SERVICE_TEMPLATE.format(link_id)
+        try:
+            result = subprocess.run(
+                ['systemctl', 'start', service_name],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                log.info(f"DCE: [{link_id}] PTY bridge service started")
+                return True
+            else:
+                log.error(f"DCE: [{link_id}] Failed to start pty-bridge: {result.stderr}")
+                return False
+        except subprocess.TimeoutExpired:
+            log.error(f"DCE: [{link_id}] Timeout starting pty-bridge")
+            return False
+        except Exception as e:
+            log.error(f"DCE: [{link_id}] Error starting pty-bridge: {e}")
+            return False
+
+    def _stop_pty_bridge(self, link_id: str) -> bool:
+        """Stop a pty-bridge service via systemctl"""
+        service_name = PTY_BRIDGE_SERVICE_TEMPLATE.format(link_id)
+        try:
+            result = subprocess.run(
+                ['systemctl', 'stop', service_name],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                log.info(f"DCE: [{link_id}] PTY bridge service stopped")
+                return True
+            else:
+                log.error(f"DCE: [{link_id}] Failed to stop pty-bridge: {result.stderr}")
+                return False
+        except subprocess.TimeoutExpired:
+            log.error(f"DCE: [{link_id}] Timeout stopping pty-bridge")
+            return False
+        except Exception as e:
+            log.error(f"DCE: [{link_id}] Error stopping pty-bridge: {e}")
+            return False
 
     def _start_proxy(self, link_id: str) -> bool:
         """Start a proxy service via systemctl"""
@@ -1347,13 +1191,13 @@ class DCEService:
                 log.info(f"DCE: [{link_id}] Proxy service started")
                 return True
             else:
-                log.error(f"DCE: [{link_id}] Failed to start proxy service: {result.stderr}")
+                log.error(f"DCE: [{link_id}] Failed to start proxy: {result.stderr}")
                 return False
         except subprocess.TimeoutExpired:
-            log.error(f"DCE: [{link_id}] Timeout starting proxy service")
+            log.error(f"DCE: [{link_id}] Timeout starting proxy")
             return False
         except Exception as e:
-            log.error(f"DCE: [{link_id}] Error starting proxy service: {e}")
+            log.error(f"DCE: [{link_id}] Error starting proxy: {e}")
             return False
 
     def _stop_proxy(self, link_id: str) -> bool:
@@ -1370,36 +1214,13 @@ class DCEService:
                 log.info(f"DCE: [{link_id}] Proxy service stopped")
                 return True
             else:
-                log.error(f"DCE: [{link_id}] Failed to stop proxy service: {result.stderr}")
+                log.error(f"DCE: [{link_id}] Failed to stop proxy: {result.stderr}")
                 return False
         except subprocess.TimeoutExpired:
-            log.error(f"DCE: [{link_id}] Timeout stopping proxy service")
+            log.error(f"DCE: [{link_id}] Timeout stopping proxy")
             return False
         except Exception as e:
-            log.error(f"DCE: [{link_id}] Error stopping proxy service: {e}")
-            return False
-
-    def _restart_proxy(self, link_id: str) -> bool:
-        """Restart a proxy service via systemctl"""
-        service_name = PROXY_SERVICE_TEMPLATE.format(link_id)
-        try:
-            result = subprocess.run(
-                ['systemctl', 'restart', service_name],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            if result.returncode == 0:
-                log.info(f"DCE: [{link_id}] Proxy service restarted")
-                return True
-            else:
-                log.error(f"DCE: [{link_id}] Failed to restart proxy service: {result.stderr}")
-                return False
-        except subprocess.TimeoutExpired:
-            log.error(f"DCE: [{link_id}] Timeout restarting proxy service")
-            return False
-        except Exception as e:
-            log.error(f"DCE: [{link_id}] Error restarting proxy service: {e}")
+            log.error(f"DCE: [{link_id}] Error stopping proxy: {e}")
             return False
 
 
@@ -1562,28 +1383,6 @@ def signal_handler(signum, frame):
     raise SystemExit(0)
 
 
-def run_ptyhub() -> int:
-    """PTY Hub service entry point"""
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGHUP, signal_handler)
-
-    service = PTYHub()
-
-    if not service.start():
-        return EXIT_SERVICE_START_FAILED
-
-    try:
-        service.register_callbacks()
-        service.run()
-    except SystemExit:
-        pass
-    finally:
-        service.stop()
-
-    return EXIT_SUCCESS
-
-
 def run_dce() -> int:
     """DCE service entry point"""
     signal.signal(signal.SIGINT, signal_handler)
@@ -1659,7 +1458,7 @@ def main():
     Unified entry point
 
     Usage:
-        console-monitor ptyhub [-l debug]        # Run PTY Hub service
+        console-monitor pty-bridge <link>        # Run PTY bridge for a port
         console-monitor dce [-l debug]           # Run DCE service
         console-monitor proxy [-l debug] <link>  # Run proxy for a specific port
         console-monitor dte [-l debug] [tty] [baud]  # Run DTE service
@@ -1670,7 +1469,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  console-monitor ptyhub              # Run PTY Hub service
+  console-monitor pty-bridge 1        # Run PTY bridge for link 1 (exec socat)
   console-monitor dce -l debug        # Run DCE service with debug logging
   console-monitor proxy 1             # Run proxy for link 1
   console-monitor proxy -l debug 2    # Run proxy for link 2 with debug logging
@@ -1681,11 +1480,12 @@ Examples:
 
     subparsers = parser.add_subparsers(dest='mode', help='Service mode')
 
-    # PTY Hub subcommand
-    ptyhub_parser = subparsers.add_parser('ptyhub', help='Run PTY Hub service (creates PTY bridges)')
-    ptyhub_parser.add_argument('-l', '--log-level',
-                               choices=['debug', 'info', 'warning', 'error', 'critical'],
-                               default='info', help='Set log level (default: info)')
+    # PTY Bridge subcommand
+    pty_bridge_parser = subparsers.add_parser('pty-bridge', help='Run PTY bridge for a port (exec socat)')
+    pty_bridge_parser.add_argument('-l', '--log-level',
+                                   choices=['debug', 'info', 'warning', 'error', 'critical'],
+                                   default='info', help='Set log level (default: info)')
+    pty_bridge_parser.add_argument('link_id', help='Link ID (console port number)')
 
     # DCE subcommand
     dce_parser = subparsers.add_parser('dce', help='Run DCE (Console Server) service')
@@ -1718,8 +1518,8 @@ Examples:
     set_log_level(args.log_level)
 
     # Dispatch to appropriate service
-    if args.mode == "ptyhub":
-        sys.exit(run_ptyhub())
+    if args.mode == "pty-bridge":
+        sys.exit(run_pty_bridge(args.link_id))
     elif args.mode == "dce":
         sys.exit(run_dce())
     elif args.mode == "proxy":

@@ -1,9 +1,9 @@
 [Unit]
 Description=Console Monitor Proxy Service for port %i
 Documentation=https://github.com/sonic-net/SONiC/blob/master/doc/console/Console-Monitor-High-Level-Design.md
-After=config-setup.service database.service console-monitor-ptyhub.service
+After=config-setup.service database.service console-monitor-pty-bridge@%i.service
 Requires=config-setup.service database.service
-Wants=console-monitor-ptyhub.service
+Wants=console-monitor-pty-bridge@%i.service
 
 [Service]
 Type=simple

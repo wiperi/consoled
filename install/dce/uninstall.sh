@@ -8,21 +8,20 @@ set -e
 
 echo "Uninstalling console-monitor DCE services..."
 
-# 1. 停止服务 (先停止 proxy 服务，再停止其他服务)
+# 1. 停止服务 (先停止 proxy，再停止 pty-bridge，最后停止 dce)
 echo "  Stopping services..."
 sudo systemctl stop 'console-monitor-proxy@*' 2>/dev/null || true
+sudo systemctl stop 'console-monitor-pty-bridge@*' 2>/dev/null || true
 sudo systemctl stop console-monitor-dce.service 2>/dev/null || true
-sudo systemctl stop console-monitor-ptyhub.service 2>/dev/null || true
 
 # 2. 禁用服务
 echo "  Disabling services..."
 sudo systemctl disable console-monitor-dce.service 2>/dev/null || true
-sudo systemctl disable console-monitor-ptyhub.service 2>/dev/null || true
 
 # 3. 删除服务单元文件
 echo "  Removing service units..."
 sudo rm -f /etc/systemd/system/console-monitor-dce.service
-sudo rm -f /etc/systemd/system/console-monitor-ptyhub.service
+sudo rm -f /etc/systemd/system/console-monitor-pty-bridge@.service
 sudo rm -f /etc/systemd/system/console-monitor-proxy@.service
 
 # 4. 删除 console-monitor 可执行文件
