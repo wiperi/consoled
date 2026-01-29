@@ -5,7 +5,7 @@
 # 需要 root 权限运行
 #
 # 安装内容：
-# - console-monitor 可执行文件到 /usr/bin/console-monitor
+# - console-monitor 可执行文件到 /usr/local/bin/console-monitor
 # - console-monitor-dce.service (DCE 服务，管理其他服务)
 # - console-monitor-pty-bridge@.service (PTY Bridge 模板服务)
 # - console-monitor-proxy@.service (Proxy 模板服务)
@@ -20,8 +20,8 @@ echo "Installing console-monitor DCE services..."
 
 # 1. 安装 console-monitor 可执行文件
 echo "  Installing console-monitor executable..."
-sudo cp "${SCRIPT_DIR}/../../console_monitor/console-monitor" /usr/bin/console-monitor
-sudo chmod +x /usr/bin/console-monitor
+sudo cp "${SCRIPT_DIR}/../../console_monitor/console-monitor" /usr/local/bin/console-monitor
+sudo chmod +x /usr/local/bin/console-monitor
 
 # 2. 安装服务单元文件
 echo "  Installing service units..."

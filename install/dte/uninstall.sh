@@ -22,7 +22,7 @@ sudo rm -f /lib/systemd/system/console-monitor-dte.service
 
 # 4. 删除 console-monitor 可执行文件
 echo "  Removing console-monitor executable..."
-sudo rm -f /usr/bin/console-monitor
+sudo rm -f /usr/local/bin/console-monitor
 
 # 5. 重新加载 systemd
 echo "  Reloading systemd..."

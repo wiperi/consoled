@@ -4,7 +4,7 @@
 # 安装 console-monitor DTE 服务的脚本
 # 需要 root 权限运行
 #
-# 安装统一的 console-monitor 命令到 /usr/bin/console-monitor
+# 安装统一的 console-monitor 命令到 /usr/local/bin/console-monitor
 # 通过 `console-monitor dte` 参数启动 DTE 模式
 
 set -e
@@ -15,8 +15,8 @@ echo "Installing console-monitor DTE service..."
 
 # 1. 安装 console-monitor 可执行文件
 echo "  Installing console-monitor executable..."
-sudo cp "${SCRIPT_DIR}/../../console_monitor/console-monitor" /usr/bin/console-monitor
-sudo chmod +x /usr/bin/console-monitor
+sudo cp "${SCRIPT_DIR}/../../console_monitor/console-monitor" /usr/local/bin/console-monitor
+sudo chmod +x /usr/local/bin/console-monitor
 
 # 2. 安装服务文件
 echo "  Installing service file..."

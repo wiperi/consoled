@@ -26,7 +26,7 @@ sudo rm -f /etc/systemd/system/console-monitor-proxy@.service
 
 # 4. 删除 console-monitor 可执行文件
 echo "  Removing console-monitor executable..."
-sudo rm -f /usr/bin/console-monitor
+sudo rm -f /usr/local/bin/console-monitor
 
 # 5. 清理 PTY 符号链接（如果服务异常退出未清理）
 echo "  Cleaning up PTY symlinks..."
