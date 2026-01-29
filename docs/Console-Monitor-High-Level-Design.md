@@ -23,7 +23,7 @@
 - [3. Detailed Design](#3-detailed-design)
   - [3.1 Frame Structure Design](#31-frame-structure-design)
   - [3.2 DTE Side Service](#32-dte-side-service)
-  - [3.3 DCE Side Service](#33-dce-side-service)
+  - [3.3 DCE Side Services](#33-dce-side-services)
 - [4. Database Changes](#4-database-changes)
 - [5. CLI](#5-cli)
 - [6. Example Configuration](#6-example-configuration)
@@ -709,7 +709,52 @@ admin@sonic:~$ sonic-db-cli STATE_DB HGETALL "CONSOLE_PORT|2"
 
 ## 5. CLI
 
-### 5.1 Show line
+### 5.1 console-monitor Command
+
+The `console-monitor` command is the unified entry point for all console monitor services.
+
+```bash
+console-monitor <subcommand> [options] [arguments]
+```
+
+#### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `pty-bridge <link_id>` | Run PTY bridge for a port (exec socat) |
+| `dce` | Run DCE (Console Server) control service |
+| `proxy <link_id>` | Run proxy for a specific serial port |
+| `dte [tty_name] [baud]` | Run DTE (SONiC Switch) heartbeat service |
+
+#### Common Options
+
+| Option | Description |
+|--------|-------------|
+| `-l, --log-level` | Set log level: `debug`, `info`, `warning`, `error`, `critical` (default: `info`) |
+
+#### Examples
+
+```bash
+# Run PTY bridge for link 1 (creates PTY pair via socat)
+console-monitor pty-bridge 1
+
+# Run DCE control service with debug logging
+console-monitor dce -l debug
+
+# Run proxy for link 1
+console-monitor proxy 1
+
+# Run proxy for link 2 with debug logging
+console-monitor proxy -l debug 2
+
+# Run DTE service (auto-detect TTY from /proc/cmdline)
+console-monitor dte
+
+# Run DTE service with specified TTY and baud rate
+console-monitor dte -l debug ttyS0 9600
+```
+
+### 5.2 Show line
 
 Alias of `consutil show`
 
@@ -735,9 +780,9 @@ New columns:
 | Oper State | Current operational state of console link |
 | State Duration | Duration of current state (format: XyXdXhXmXs, only shows non-zero parts) |
 
-### 5.2 Configuration Commands
+### 5.3 Configuration Commands
 
-#### 5.2.1 Enable/Disable Console Heartbeat (DTE Side)
+#### 5.3.1 Enable/Disable Console Heartbeat (DTE Side)
 
 ```bash
 config console heartbeat {enable|disable}
@@ -758,7 +803,7 @@ admin@switch:~$ sudo config console heartbeat disable
 admin@switch:~$ sonic-db-cli CONFIG_DB HGETALL "CONSOLE_SWITCH|controlled_device"
 ```
 
-#### 5.2.2 Enable/Disable Console Monitor (DCE Side)
+#### 5.3.2 Enable/Disable Console Monitor (DCE Side)
 
 ```bash
 config console {enable|disable}
