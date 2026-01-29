@@ -64,6 +64,22 @@ sync_file \
     "console_monitor/console-monitor" \
     "downstream/sonic-host-services/scripts/console-monitor"
 
+sync_file \
+    "install/dce/console-monitor-proxy@.service" \
+    "downstream/sonic-host-services/data/debian/sonic-host-services-data.console-monitor-proxy@.service"
+
+sync_file \
+    "install/dce/console-monitor-pty-bridge@.service" \
+    "downstream/sonic-host-services/data/debian/sonic-host-services-data.console-monitor-pty-bridge@.service"
+
+sync_file \
+    "install/dce/console-monitor-dce.service" \
+    "downstream/sonic-host-services/data/debian/sonic-host-services-data.console-monitor-dce.service"
+
+sync_file \
+    "install/dte/console-monitor-dte.service" \
+    "downstream/sonic-host-services/data/debian/sonic-host-services-data.console-monitor-dte.service"
+
 echo ""
 echo ">>> Syncing to SONiC..."
 sync_file \
