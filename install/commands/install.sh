@@ -60,13 +60,18 @@ sync_dir() {
 
 echo ""
 echo ">>> Syncing to local Python packages..."
+
+# 动态获取 Python site-packages 路径
+SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+echo "  Python site-packages: $SITE_PACKAGES"
+
 sync_dir \
     "../../commands/consutil" \
-    "/usr/local/lib/python3.11/dist-packages/consutil"
+    "$SITE_PACKAGES/consutil"
 
 sync_file \
     "../../commands/config/console.py" \
-    "/usr/local/lib/python3.11/dist-packages/config/console.py"
+    "$SITE_PACKAGES/config/console.py"
 
 echo ""
 echo "=========================================="
